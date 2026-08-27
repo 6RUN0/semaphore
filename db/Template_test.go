@@ -172,8 +172,8 @@ func TestValidateSurveyVar(t *testing.T) {
 func TestTemplateValidate_SurveyVarDefaultValue(t *testing.T) {
 	// Validate() must surface ValidateSurveyVar errors end-to-end.
 	tpl := Template{
-		Name:       "test",
-		Playbook:   "playbook.yml",
+		Name:     "test",
+		Playbook: "playbook.yml",
 		SurveyVars: []SurveyVar{
 			{
 				Name:         "BAD",
