@@ -10,6 +10,7 @@ import (
 	"github.com/semaphoreui/semaphore/pkg/task_logger"
 	"github.com/semaphoreui/semaphore/services/tasks"
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 // newTestRunningJob wires a runningJob to a LocalJob whose Logger points back at
@@ -78,10 +79,53 @@ func TestRunningJob_AckLogRecords(t *testing.T) {
 			pending := rj.ackLogRecords(tt.sent)
 			assert.Equal(t, tt.wantPending, pending)
 
-			_, logs, _ := rj.getProgress()
+			_, logs, _, _ := rj.getProgress()
 			assert.Len(t, logs, tt.wantPending)
 		})
 	}
+}
+
+func TestRunningJob_AckResolvedInventory(t *testing.T) {
+	t.Run("clears the acknowledged snapshot", func(t *testing.T) {
+		rj := newTestRunningJob(1)
+		rj.SetResolvedInventory([]string{"web01"}, nil)
+
+		_, _, _, sent := rj.getProgress()
+		require.NotNil(t, sent)
+
+		rj.ackResolvedInventory(sent)
+
+		_, _, _, resolvedInventory := rj.getProgress()
+		assert.Nil(t, resolvedInventory, "acknowledged inventory must not be reported again")
+	})
+
+	t.Run("keeps a newer snapshot set after the acked one was sent", func(t *testing.T) {
+		rj := newTestRunningJob(1)
+		rj.SetResolvedInventory([]string{"web01"}, nil)
+
+		_, _, _, stale := rj.getProgress()
+		require.NotNil(t, stale)
+
+		// A fresh resolve happens between send and ack (e.g. the job resolves
+		// again before the server's response arrives).
+		rj.SetResolvedInventory([]string{"web02"}, nil)
+
+		rj.ackResolvedInventory(stale)
+
+		_, _, _, resolvedInventory := rj.getProgress()
+		require.NotNil(t, resolvedInventory, "the newer snapshot must survive an ack for the stale one")
+		assert.Equal(t, []string{"web02"}, resolvedInventory.Hosts)
+	})
+
+	t.Run("nil ack is a no-op", func(t *testing.T) {
+		rj := newTestRunningJob(1)
+		rj.SetResolvedInventory([]string{"web01"}, nil)
+
+		rj.ackResolvedInventory(nil)
+
+		_, _, _, resolvedInventory := rj.getProgress()
+		assert.NotNil(t, resolvedInventory)
+	})
 }
 
 func TestRunningJob_GetProgressReturnsCopy(t *testing.T) {
@@ -89,13 +133,13 @@ func TestRunningJob_GetProgressReturnsCopy(t *testing.T) {
 	rj.Log("a")
 	rj.Log("b")
 
-	_, logs, _ := rj.getProgress()
+	_, logs, _, _ := rj.getProgress()
 	assert.Len(t, logs, 2)
 
 	// Mutating the returned slice must not corrupt the internal state.
 	logs[0].Message = "mutated"
 
-	_, logs2, _ := rj.getProgress()
+	_, logs2, _, _ := rj.getProgress()
 	assert.Equal(t, "a", logs2[0].Message)
 }
 
@@ -134,7 +178,7 @@ func TestRunningJob_ConcurrentAccess(t *testing.T) {
 		spawn(func(i int) { rj.SetCommit(fmt.Sprintf("hash%d", i), "msg") })
 		spawn(func(i int) {
 			rj.getStatus()
-			_, logs, _ := rj.getProgress()
+			_, logs, _, _ := rj.getProgress()
 			if len(logs) > 0 {
 				rj.ackLogRecords(1)
 			}

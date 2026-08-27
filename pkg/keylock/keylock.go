@@ -1,11 +1,11 @@
-package tasks
+package keylock
 
 import "sync"
 
 // KeyLock serializes work on a shared resource identified by a string key.
 // It exists to prevent concurrent git operations (pull/clone/checkout) on the
-// same repository directory when a template allows parallel tasks: all such
-// tasks share one working copy on disk, and concurrent `git pull` corrupts it.
+// same working directory: whoever shares one copy on disk corrupts it with a
+// concurrent `git pull`.
 //
 // The zero value is ready to use.
 type KeyLock struct {
@@ -16,8 +16,8 @@ type KeyLock struct {
 // Lock blocks until the mutex for the given key is acquired and returns the
 // unlock function.
 //
-// ponytail: entries are never removed — the map is bounded by the number of
-// repository directories (repos × templates), which is negligible.
+// Note: entries are never removed — the map is bounded by the number of
+// distinct directories (repos × templates), which is negligible.
 func (l *KeyLock) Lock(key string) func() {
 	l.mu.Lock()
 	if l.locks == nil {

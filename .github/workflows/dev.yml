@@ -13,6 +13,34 @@ jobs:
   build-local:
     runs-on: ubuntu-latest
 
+    # The snapshot store carries hand-written SQL that the SQLite tests cannot
+    # vouch for on MySQL and PostgreSQL; the dialect tests need real servers.
+    services:
+      mysql:
+        image: mysql:8
+        env:
+          MYSQL_ROOT_PASSWORD: test
+          MYSQL_DATABASE: semaphore_test
+        ports:
+          - 13306:3306
+        options: >-
+          --health-cmd "mysqladmin ping -h localhost -ptest"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_PASSWORD: test
+          POSTGRES_DB: semaphore_test
+        ports:
+          - 15432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres"
+          --health-interval 5s
+          --health-timeout 5s
+          --health-retries 10
+
     steps:
       - name: Checkout source
         uses: actions/checkout@v7
@@ -50,8 +78,29 @@ jobs:
         run: |
           git diff --exit-code --stat -- . ':(exclude)web/package.json' ':(exclude)web/package-lock.json' ':(exclude)go.mod' ':(exclude)go.sum'
 
+      # The inventory parser has to agree with the tool it reproduces, and the
+      # tests that check that need a real ansible-inventory. A venv keeps the
+      # exact binary addressable without relying on PATH.
+      - name: Install ansible for the inventory differential tests
+        run: |
+          python3 -m venv "$HOME/.ansible-venv"
+          # Pinned to the version the parser constants were derived against —
+          # see db_lib/InventorySource.go, which carries the re-derivation
+          # command. Bump the pin and the constants together.
+          "$HOME/.ansible-venv/bin/pip" install --quiet ansible-core==2.21.3
+          echo "SEMAPHORE_TEST_ANSIBLE_INVENTORY=$HOME/.ansible-venv/bin/ansible-inventory" >> "$GITHUB_ENV"
+
       - name: Run tests
         run: task test
+        env:
+          # Without the REQUIRED flags a missing binary or database skips the
+          # tests behind it, and a skipped test still reports ok — an
+          # environment that stopped running them would look exactly like one
+          # where they pass.
+          SEMAPHORE_TEST_ANSIBLE_REQUIRED: '1'
+          SEMAPHORE_TEST_MYSQL: 'root:test@127.0.0.1:13306/semaphore_test'
+          SEMAPHORE_TEST_POSTGRES: 'postgres:test@127.0.0.1:15432/semaphore_test?sslmode=disable'
+          SEMAPHORE_TEST_DIALECTS_REQUIRED: '1'
 
       - name: Upload artifacts
         uses: actions/upload-artifact@v7

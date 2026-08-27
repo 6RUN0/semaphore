@@ -16,6 +16,7 @@ import (
 
 	"github.com/semaphoreui/semaphore/db"
 	"github.com/semaphoreui/semaphore/db_lib"
+	"github.com/semaphoreui/semaphore/pkg/keylock"
 	"github.com/semaphoreui/semaphore/pkg/task_logger"
 
 	"github.com/semaphoreui/semaphore/util"
@@ -49,6 +50,21 @@ type PoolEvent struct {
 	task      *TaskRunner
 }
 
+// resolvedInventoryStore is everything the pool is allowed to do with an
+// inventory snapshot: record the host list a runner reported back.
+//
+// It is declared here, on the consumer side, rather than used as the full
+// server.InventorySnapshotService on purpose. The API router builds its own
+// instance of that service, and every instance carries its own in-process
+// checkout lock and remote-head cache while the checkout directory name is
+// derived from the inventory and therefore shared. Two instances calling the
+// read side would work the same directory under different mutexes; narrowing
+// the type here means the compiler, not a comment, is what keeps the pool's
+// instance off that side.
+type resolvedInventoryStore interface {
+	StoreResolved(projectID int, inventoryID int, taskID int, content db.InventorySnapshotContent) error
+}
+
 type TaskPool struct {
 	// register channel used to put tasks to queue.
 	register chan *TaskRunner
@@ -56,21 +72,22 @@ type TaskPool struct {
 	// logger channel used to putting log records to database.
 	logger chan logRecord
 
-	store                  db.Store
-	ansibleTaskRepo        db.AnsibleTaskRepository
-	logWriteService        pro_interfaces.LogWriteService
-	inventoryService       server.InventoryService
-	encryptionService      server.AccessKeyEncryptionService
-	keyInstallationService server.AccessKeyInstallationService
-	signer                 jwt.Signer
-	metrics                *metrics.Metrics
+	store                    db.Store
+	ansibleTaskRepo          db.AnsibleTaskRepository
+	logWriteService          pro_interfaces.LogWriteService
+	inventoryService         server.InventoryService
+	inventorySnapshotService resolvedInventoryStore
+	encryptionService        server.AccessKeyEncryptionService
+	keyInstallationService   server.AccessKeyInstallationService
+	signer                   jwt.Signer
+	metrics                  *metrics.Metrics
 
 	// repoLock serializes git operations on shared repository directories
 	// across parallel tasks of the same template.
 	// Intentionally separate from LocalExecutorProvider.repoLock: TaskPool
 	// (server process) and LocalExecutorProvider (runner process) never
 	// operate on the same directories, so they need no shared lock.
-	repoLock *KeyLock
+	repoLock *keylock.KeyLock
 
 	queueEvents chan PoolEvent
 
@@ -93,6 +110,13 @@ type TaskPool struct {
 	// util.Config). It is never closed if Run was not started, so Stop must only
 	// be called after Run.
 	reconcileDone chan struct{}
+
+	// recovered is closed once recoverInterruptedTasks has finished. It is the
+	// barrier that lets recovery run off the queue's own goroutine: until it is
+	// closed, handleQueue accepts and enqueues events but starts nothing, so no
+	// task is scheduled against a picture of what is running that recovery is
+	// still filling in. Like reconcileDone it is only ever closed by Run.
+	recovered chan struct{}
 }
 
 func CreateTaskPool(
@@ -107,21 +131,30 @@ func CreateTaskPool(
 	appMetrics *metrics.Metrics,
 ) TaskPool {
 	p := TaskPool{
-		register:               make(chan *TaskRunner),      // add TaskRunner to queue
-		logger:                 make(chan logRecord, 10000), // store log records to database
-		store:                  store,
-		state:                  state,
-		queueEvents:            make(chan PoolEvent),
-		inventoryService:       inventoryService,
+		register:         make(chan *TaskRunner),      // add TaskRunner to queue
+		logger:           make(chan logRecord, 10000), // store log records to database
+		store:            store,
+		state:            state,
+		queueEvents:      make(chan PoolEvent),
+		inventoryService: inventoryService,
+
+		// Derived from arguments already passed rather than injected, because
+		// there is nothing to choose here: it writes to the same store. The
+		// field type is resolvedInventoryStore, so only StoreResolved is
+		// reachable through it -- see the interface for why that matters.
+		inventorySnapshotService: server.NewInventorySnapshotService(
+			store, store, store, store, keyInstallationService,
+		),
 		ansibleTaskRepo:        ansibleTaskRepo,
 		encryptionService:      encryptionService,
 		logWriteService:        logWriteService,
 		keyInstallationService: keyInstallationService,
 		signer:                 signer,
 		metrics:                appMetrics,
-		repoLock:               &KeyLock{},
+		repoLock:               &keylock.KeyLock{},
 		stop:                   make(chan struct{}),
 		reconcileDone:          make(chan struct{}),
+		recovered:              make(chan struct{}),
 	}
 	// attempt to start HA state store (no-op for memory)
 	_ = p.state.Start(p.hydrateTaskRunner)
@@ -217,6 +250,29 @@ func (p *TaskPool) Run() {
 		broadcaster.SetTaskStopHandler(p.stopLocalTask)
 	}
 
+	// Settle what the previous process left behind — see
+	// recoverInterruptedTasks. It runs on its own goroutine because the select
+	// loop below is the only reader of p.register, and AddTask completes by
+	// writing to that unbuffered channel: doing recovery here first would hang
+	// every API "run task" call and every schedule that fires meanwhile, for as
+	// long as recovery takes (several queries per interrupted row).
+	//
+	// The ordering recovery does need is kept by p.recovered, which handleQueue
+	// waits on before it starts anything: events are accepted and queued
+	// throughout, but no task is scheduled until the pool's picture of what is
+	// already running is complete.
+	go func() {
+		defer close(p.recovered)
+		p.recoverInterruptedTasks()
+
+		// Wake the queue so a task that arrived during recovery starts now
+		// rather than on the next five-second tick.
+		select {
+		case p.queueEvents <- PoolEvent{EventTypeEmpty, nil}:
+		case <-p.stop:
+		}
+	}()
+
 	go p.handleQueue()
 	go p.handleLogs()
 	go p.taskSecretSweepLoop()
@@ -266,6 +322,17 @@ func getTaskName(t *TaskRunner) string {
 	return t.Template.Name + " (" + strconv.Itoa(t.Task.ID) + ")"
 }
 
+// isRecovered reports whether restart recovery has finished. It is false until
+// Run's recovery goroutine closes the barrier, and stays true afterwards.
+func (p *TaskPool) isRecovered() bool {
+	select {
+	case <-p.recovered:
+		return true
+	default:
+		return false
+	}
+}
+
 func (p *TaskPool) handleQueue() {
 	for t := range p.queueEvents {
 		// When a task is re-queued (e.g., no remote runner available), we should
@@ -287,6 +354,15 @@ func (p *TaskPool) handleQueue() {
 			p.state.Enqueue(t.task)
 		case EventTypeFinished:
 			p.onTaskStop(t.task)
+		}
+
+		// Bookkeeping above always happens; starting tasks waits for recovery.
+		// A task started against a half-restored pool would be scheduled
+		// against the wrong capacity — the tasks recovery is about to put back
+		// into the running set are not in it yet. Recovery sends an event of
+		// its own when it finishes, so nothing waits for the next tick.
+		if !p.isRecovered() {
+			continue
 		}
 
 		// Snapshot the queue once per pass and address every task by ID. In HA
@@ -709,10 +785,20 @@ func (p *TaskPool) StopTask(targetTask db.Task, forceStop bool) error {
 	if tsk == nil {
 		tsk = NewTaskRunner(targetTask, p, "", p.keyInstallationService)
 
-		err := tsk.populateDetails()
-		if err != nil {
-			return err
+		if err := tsk.populateDetails(); err != nil {
+			// Marking a dead task stopped must not depend on the health of its
+			// template, repository or keys: the row is all that is left of the
+			// task, and refusing to touch it leaves "running" forever with raw
+			// SQL as the only cure (issue #1376).
+			log.WithError(err).WithFields(log.Fields{
+				"task_id": targetTask.ID,
+				"context": "task_stop",
+			}).Warn("stopping a task whose details can no longer be loaded")
+
+			p.stopInterruptedTask(targetTask, "Task was stopped manually; its details could no longer be loaded.")
+			return nil
 		}
+
 		tsk.SetStatus(task_logger.TaskStoppedStatus)
 		tsk.createTaskEvent()
 		return nil

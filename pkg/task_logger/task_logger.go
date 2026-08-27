@@ -139,6 +139,12 @@ type Logger interface {
 
 	SetCommit(hash, message string)
 
+	// SetResolvedInventory reports the hosts a dynamic inventory resolved to.
+	// Names only: the listing it comes from also carries every host variable,
+	// so the reduction happens before this is called. Primitives rather than a
+	// model type because db already depends on this package.
+	SetResolvedInventory(hosts []string, groups map[string][]string)
+
 	WaitLog()
 }
 
@@ -147,13 +153,14 @@ type Logger interface {
 // task log to write to.
 type NopLogger struct{}
 
-func (NopLogger) Log(string)                             {}
-func (NopLogger) Logf(string, ...any)                    {}
-func (NopLogger) LogWithTime(time.Time, string)          {}
-func (NopLogger) LogfWithTime(time.Time, string, ...any) {}
-func (NopLogger) LogCmd(*exec.Cmd)                       {}
-func (NopLogger) SetStatus(TaskStatus)                   {}
-func (NopLogger) AddStatusListener(StatusListener)       {}
-func (NopLogger) AddLogListener(LogListener)             {}
-func (NopLogger) SetCommit(string, string)               {}
-func (NopLogger) WaitLog()                               {}
+func (NopLogger) Log(string)                                         {}
+func (NopLogger) Logf(string, ...any)                                {}
+func (NopLogger) LogWithTime(time.Time, string)                      {}
+func (NopLogger) LogfWithTime(time.Time, string, ...any)             {}
+func (NopLogger) LogCmd(*exec.Cmd)                                   {}
+func (NopLogger) SetStatus(TaskStatus)                               {}
+func (NopLogger) AddStatusListener(StatusListener)                   {}
+func (NopLogger) AddLogListener(LogListener)                         {}
+func (NopLogger) SetCommit(string, string)                           {}
+func (NopLogger) SetResolvedInventory([]string, map[string][]string) {}
+func (NopLogger) WaitLog()                                           {}

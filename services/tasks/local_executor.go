@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"maps"
 	"os"
+	"sort"
 	"strings"
 
 	"path"
@@ -14,6 +15,7 @@ import (
 
 	"github.com/semaphoreui/semaphore/db"
 	"github.com/semaphoreui/semaphore/db_lib"
+	"github.com/semaphoreui/semaphore/pkg/keylock"
 	"github.com/semaphoreui/semaphore/pkg/task_logger"
 	"github.com/semaphoreui/semaphore/util"
 )
@@ -44,7 +46,7 @@ type LocalExecutor struct {
 	// (AllowParallelTasks) but share one working copy — concurrent `git pull`
 	// on it is a race. Wired by TaskPool (local) and LocalExecutorProvider
 	// (runner). Must be non-nil when Prepare is called for a git repository.
-	RepoLock *KeyLock
+	RepoLock *keylock.KeyLock
 
 	WorkflowArtifacts map[string]any
 
@@ -108,6 +110,10 @@ func (t *LocalExecutor) SetCommit(hash, message string) {
 	t.Task.CommitHash = &hash
 	t.Task.CommitMessage = message
 	t.Logger.SetCommit(hash, message)
+}
+
+func (t *LocalExecutor) SetResolvedInventory(hosts []string, groups map[string][]string) {
+	t.Logger.SetResolvedInventory(hosts, groups)
 }
 
 func (t *LocalExecutor) getTaskDetails(username string, incomingVersion *string) (taskDetails map[string]any) {
@@ -434,6 +440,95 @@ func (t *LocalExecutor) getTerraformArgs(username string, incomingVersion *strin
 	return
 }
 
+// inventoryFilename is the path ansible is pointed at, which depends on where
+// the inventory lives: a static one is written to a temporary file, a file one
+// is either relative to the working directory or inside its own repository
+// checkout.
+func (t *LocalExecutor) inventoryFilename() (string, error) {
+	switch t.Inventory.Type {
+	case db.InventoryFile:
+		if t.Inventory.RepositoryID == nil {
+			return t.Inventory.GetFilename(), nil
+		}
+
+		return path.Join(t.tmpInventoryFullPath(), t.Inventory.GetFilename()), nil
+	case db.InventoryStatic, db.InventoryStaticYaml:
+		return t.tmpInventoryFullPath(), nil
+	default:
+		return "", fmt.Errorf("invalid inventory type")
+	}
+}
+
+// resolveInventoryOnly reports whether this task lists an inventory's hosts
+// instead of running a play.
+func (t *LocalExecutor) resolveInventoryOnly() bool {
+	return t.Task.IsInventoryResolve()
+}
+
+// checkResolvableVaults rejects a resolve whose template holds a stored vault
+// password. Such a password is answered by typing into a pty, which a play has
+// (getPlaybookArgs pairs --vault-id=name@prompt with an entry in inputs, and
+// RunPlaybook feeds it) and a listing has not: RunInventoryListing runs
+// ansible-inventory with no terminal and passes no inputs at all. Without this
+// the run would hang on a prompt nobody can answer.
+//
+// It is checked in Prepare, before the repository is checked out and the keys
+// are installed, so a person gets the reason rather than a stuck task.
+func (t *LocalExecutor) checkResolvableVaults() error {
+	for _, vault := range t.Template.Vaults {
+		if vault.Type == db.TemplateVaultPassword {
+			return fmt.Errorf("inventory cannot be resolved for a template whose vault is a " +
+				"stored password, because a listing has no terminal to enter it into; " +
+				"use a vault script instead")
+		}
+	}
+
+	return nil
+}
+
+// getInventoryArgs builds the arguments for listing an inventory's hosts rather
+// than running a play. Nothing of the task's own parameters belongs here: a
+// listing takes no limit, no tags and no check mode.
+//
+// Vault ids are the exception: an inventory file, or the group_vars beside it,
+// may itself be encrypted, and without them ansible-inventory fails with a raw
+// "Attempting to decrypt but no vault secrets found" that says nothing about
+// what to fix.
+func (t *LocalExecutor) getInventoryArgs() ([]string, error) {
+	inventoryFilename, err := t.inventoryFilename()
+	if err != nil {
+		return nil, err
+	}
+
+	args := []string{"-i", inventoryFilename, "--list"}
+
+	// Sorted so the command line a person sees in the log is the same on every
+	// run; map order alone would shuffle it.
+	names := make([]string, 0, len(t.vaultFileInstallations))
+	for name := range t.vaultFileInstallations {
+		names = append(names, name)
+	}
+	sort.Strings(names)
+
+	for _, name := range names {
+		install := t.vaultFileInstallations[name]
+
+		if install.Password != "" {
+			// A password vault is answered over a pty, and a listing has
+			// none -- see the check in Prepare, which is where this is
+			// supposed to be caught.
+			return nil, fmt.Errorf(
+				"vault %q asks for a password, which cannot be supplied while listing an inventory", name)
+		}
+
+		if install.Script != "" {
+			args = append(args, fmt.Sprintf("--vault-id=%s@%s", name, install.Script))
+		}
+	}
+
+	return args, nil
+}
+
 // nolint: gocyclo
 func (t *LocalExecutor) getPlaybookArgs(username string, incomingVersion *string) (args []string, inputs map[string]string, err error) {
 
@@ -445,18 +540,8 @@ func (t *LocalExecutor) getPlaybookArgs(username string, incomingVersion *string
 		playbookName = t.Template.Playbook
 	}
 
-	var inventoryFilename string
-	switch t.Inventory.Type {
-	case db.InventoryFile:
-		if t.Inventory.RepositoryID == nil {
-			inventoryFilename = t.Inventory.GetFilename()
-		} else {
-			inventoryFilename = path.Join(t.tmpInventoryFullPath(), t.Inventory.GetFilename())
-		}
-	case db.InventoryStatic, db.InventoryStaticYaml:
-		inventoryFilename = t.tmpInventoryFullPath()
-	default:
-		err = fmt.Errorf("invalid inventory type")
+	inventoryFilename, err := t.inventoryFilename()
+	if err != nil {
 		return
 	}
 
@@ -777,6 +862,22 @@ func (t *LocalExecutor) Prepare(username string, incomingVersion *string, alias 
 		return nil
 	}
 
+	// Defense in depth behind the dispatcher's own check: the resolve flag is
+	// only understood by the Ansible branch below, and any other app would
+	// silently ignore it and run the template for real.
+	if t.resolveInventoryOnly() && t.Template.App != db.AppAnsible {
+		err = fmt.Errorf("inventory can only be resolved with an ansible template, not %q", t.Template.App)
+		t.Log(err.Error())
+		return
+	}
+
+	if t.resolveInventoryOnly() {
+		if err = t.checkResolvableVaults(); err != nil {
+			t.Log(err.Error())
+			return
+		}
+	}
+
 	t.SetStatus(task_logger.TaskRunningStatus) // It is required for local mode. Don't delete
 
 	// Defense in depth: reject playbook paths pointing outside the repository
@@ -869,7 +970,12 @@ func (t *LocalExecutor) Prepare(username string, incomingVersion *string, alias 
 	var args []string
 	switch t.Template.App {
 	case db.AppAnsible:
-		args, inputs, err = t.getPlaybookArgs(username, incomingVersion)
+		if t.resolveInventoryOnly() {
+			args, err = t.getInventoryArgs()
+		} else {
+			args, inputs, err = t.getPlaybookArgs(username, incomingVersion)
+		}
+
 		if err != nil {
 			return
 		}

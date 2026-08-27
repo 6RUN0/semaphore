@@ -64,6 +64,17 @@ type JobProgress struct {
 	Status     task_logger.TaskStatus
 	LogRecords []LogRecord
 	Commit     *CommitInfo
+
+	// ResolvedInventory carries the host list of a dynamic inventory the job
+	// was asked to resolve. It is nil for every other job, and for every job a
+	// runner older than this field runs, which is what keeps the two sides
+	// upgradable independently — the same way Commit was added.
+	//
+	// It holds names only. The raw `ansible-inventory --list` output also
+	// carries every host variable, passwords among them, and a snapshot is
+	// readable by any project member; so the reduction happens on the runner,
+	// before anything leaves it.
+	ResolvedInventory *db.InventorySnapshotContent
 }
 
 type RunnerRegistration struct {

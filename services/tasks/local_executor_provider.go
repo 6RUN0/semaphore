@@ -3,6 +3,7 @@ package tasks
 import (
 	"github.com/semaphoreui/semaphore/db"
 	"github.com/semaphoreui/semaphore/db_lib"
+	"github.com/semaphoreui/semaphore/pkg/keylock"
 )
 
 // LocalExecutorProvider is the ExecutorProvider for the "local" strategy: tasks run
@@ -18,7 +19,7 @@ type LocalExecutorProvider struct {
 	// Intentionally separate from TaskPool.repoLock: LocalExecutorProvider
 	// (runner process) and TaskPool (server process) never operate on the
 	// same directories, so they need no shared lock.
-	repoLock *KeyLock
+	repoLock *keylock.KeyLock
 }
 
 // NewLocalExecutorProvider takes the AccessKey installer the runner constructed at
@@ -27,7 +28,7 @@ type LocalExecutorProvider struct {
 func NewLocalExecutorProvider(keyInstaller db_lib.AccessKeyInstaller) *LocalExecutorProvider {
 	return &LocalExecutorProvider{
 		keyInstaller: keyInstaller,
-		repoLock:     &KeyLock{},
+		repoLock:     &keylock.KeyLock{},
 	}
 }
 

@@ -107,6 +107,8 @@ func Route(
 	projectsController := projects.NewProjectsController(accessKeyService)
 	terraformController := proApi.NewTerraformController(encryptionService, terraformStore, store)
 	terraformInventoryController := proProjects.NewTerraformInventoryController(terraformStore)
+	inventorySnapshotController := projects.NewInventorySnapshotController(
+		server.NewInventorySnapshotService(store, store, store, store, accessKeyInstallationService))
 	workflowController := proProjects.NewWorkflowController(workflowService, workflowStore)
 	workflowMiddlewareController := projects.NewWorkflowController(workflowStore)
 	backupController := projects.NewBackupController(workflowStore)
@@ -169,7 +171,7 @@ func Route(
 	internalAPI.HandleFunc("/runners", runners.RegisterRunner).Methods("POST")
 
 	runnersAPI := internalAPI.PathPrefix("/runners").Subrouter()
-	runnersAPI.Use(runners.RunnerMiddleware)
+	runnersAPI.Use(runners.BodyLimitMiddleware, runners.RunnerMiddleware)
 	runnersAPI.Path("").HandlerFunc(runnerController.GetRunner).Methods("GET", "HEAD")
 	runnersAPI.Path("").HandlerFunc(runnerController.UpdateRunner).Methods("PUT")
 	runnersAPI.Path("").HandlerFunc(runners.UnregisterRunner).Methods("DELETE")
@@ -437,6 +439,11 @@ func Route(
 	projectInventoryManagement.HandleFunc("/{inventory_id}/refs", projects.GetInventoryRefs).Methods("GET", "HEAD")
 	projectInventoryManagement.HandleFunc("/{inventory_id}", projects.UpdateInventory).Methods("PUT")
 	projectInventoryManagement.HandleFunc("/{inventory_id}", projects.RemoveInventory).Methods("DELETE")
+
+	projectInventoryManagement.HandleFunc("/{inventory_id}/snapshot", inventorySnapshotController.GetInventorySnapshot).Methods("GET", "HEAD")
+	projectInventoryManagement.HandleFunc("/{inventory_id}/snapshot/hosts", inventorySnapshotController.GetInventorySnapshotHosts).Methods("GET", "HEAD")
+	projectInventoryManagement.HandleFunc("/{inventory_id}/snapshot/groups", inventorySnapshotController.GetInventorySnapshotGroups).Methods("GET", "HEAD")
+	projectInventoryManagement.HandleFunc("/{inventory_id}/snapshot/refresh", inventorySnapshotController.RefreshInventorySnapshot).Methods("POST")
 
 	projectInventoryManagement.HandleFunc("/{inventory_id}/terraform/aliases", terraformInventoryController.GetTerraformInventoryAliases).Methods("GET", "HEAD")
 	projectInventoryManagement.HandleFunc("/{inventory_id}/terraform/aliases", terraformInventoryController.AddTerraformInventoryAlias).Methods("POST")

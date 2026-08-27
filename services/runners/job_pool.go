@@ -419,13 +419,14 @@ func (p *JobPool) sendProgress() (ok bool) {
 
 	for id, j := range p.snapshotRunningJobs() {
 
-		status, logRecords, commit := j.getProgress()
+		status, logRecords, commit, resolvedInventory := j.getProgress()
 
 		body.Jobs = append(body.Jobs, JobProgress{
-			ID:         id,
-			LogRecords: logRecords,
-			Status:     status,
-			Commit:     commit,
+			ID:                id,
+			LogRecords:        logRecords,
+			Status:            status,
+			Commit:            commit,
+			ResolvedInventory: resolvedInventory,
 		})
 
 		log.WithFields(log.Fields{
@@ -512,6 +513,14 @@ func (p *JobPool) sendProgress() (ok bool) {
 				"acknowledged": sent,
 				"pending":      pending,
 			}).Debug("Trimmed acknowledged log records")
+		}
+		if jp.ResolvedInventory != nil {
+			j.ackResolvedInventory(jp.ResolvedInventory)
+
+			log.WithFields(log.Fields{
+				"context": "sending_progress",
+				"task_id": jp.ID,
+			}).Debug("Acknowledged resolved inventory")
 		}
 		if jp.Status.IsFinished() {
 			log.WithFields(log.Fields{

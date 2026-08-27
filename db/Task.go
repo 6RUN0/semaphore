@@ -36,6 +36,11 @@ type AnsibleTaskParams struct {
 	Tags              []string `json:"tags"`
 	SkipTags          []string `json:"skip_tags"`
 	SkipGalaxyInstall bool     `json:"skip_galaxy_install"`
+
+	// ResolveInventoryOnly turns the task into a listing of the inventory's
+	// hosts instead of a play. It exists for dynamic inventories, whose hosts
+	// only a runner may enumerate because doing so runs a program.
+	ResolveInventoryOnly bool `json:"resolve_inventory_only"`
 }
 
 // Task is a model of a task which will be executed by the runner
@@ -96,6 +101,29 @@ func (task *Task) ExtractParams(target any) (err error) {
 	}
 	err = json.Unmarshal(content, target)
 	return
+}
+
+// TaskParamResolveInventoryOnly is the params key behind
+// AnsibleTaskParams.ResolveInventoryOnly. It is named here because
+// IsInventoryResolve reads the flag out of the map directly and the two must
+// not drift apart.
+const TaskParamResolveInventoryOnly = "resolve_inventory_only"
+
+// IsInventoryResolve reports whether this task lists an inventory's hosts
+// instead of running its template. Such a task is a service errand of the host
+// picker: it must not trigger anything a real run triggers — no autorun
+// children, no alerts, no webhooks — and its failure settles the pending
+// snapshot claim that dispatched it.
+//
+// The flag is read out of the params map rather than through ExtractParams:
+// this is asked twice on every status change plus on both sides of the resolve
+// path, and a marshal and unmarshal of the whole map for one boolean is not
+// worth it. Reading the key directly is also the stricter answer — an
+// unrelated malformed param (a "limit" stored as a string, say) used to make
+// ExtractParams fail and turn a genuine resolve into an ordinary run.
+func (task *Task) IsInventoryResolve() bool {
+	resolve, ok := task.Params[TaskParamResolveInventoryOnly].(bool)
+	return ok && resolve
 }
 
 // PreInsert is a hook which is called before inserting task into database.

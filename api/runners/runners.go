@@ -18,6 +18,36 @@ import (
 	log "github.com/sirupsen/logrus"
 )
 
+// MaxRunnerReportBodySize bounds one progress report from a runner. Without it
+// helpers.Bind decodes whatever a runner sends straight into memory, and the
+// caps in StoreResolved only apply once the whole thing is already decoded: an
+// authenticated runner could hold the server hostage with a single endless
+// body.
+//
+// The number is derived rather than picked so that no report a runner is
+// allowed to have accepted can be refused by the limit. The largest legal
+// ResolvedInventory is the host names, the group names and every host-in-group
+// membership, each name at the column width, plus JSON quoting and commas; the
+// fixed allowance on top covers the log records of the same report, which have
+// no cap of their own and can carry a backlog accumulated while the server was
+// unreachable.
+const MaxRunnerReportBodySize = int64(
+	db.MaxInventorySnapshotHosts*(db.MaxInventoryHostNameLength+3)+
+		db.MaxInventorySnapshotGroups*(db.MaxInventoryHostNameLength+32)+
+		db.MaxInventorySnapshotMemberships*(db.MaxInventoryHostNameLength+3)) +
+	32*1024*1024
+
+// BodyLimitMiddleware caps the request body of the runner API. A body over the
+// cap fails the handler's decode, which answers 400 -- the runner retries the
+// same report, so a truncated one must not be applied in part, and Bind never
+// applies a failed decode.
+func BodyLimitMiddleware(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		r.Body = http.MaxBytesReader(w, r.Body, MaxRunnerReportBodySize)
+		next.ServeHTTP(w, r)
+	})
+}
+
 func RunnerMiddleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 
@@ -407,6 +437,26 @@ func (c *RunnerController) UpdateRunner(w http.ResponseWriter, r *http.Request) 
 
 		if job.Commit != nil {
 			tsk.SetCommit(job.Commit.Hash, job.Commit.Message)
+		}
+
+		// tsk.SetResolvedInventory is the real defense (it re-checks the same
+		// thing against db.Task.Params, which the runner cannot influence);
+		// this is a second, earlier gate so a runner attaching a host list to
+		// an ordinary playbook's progress report is visible in the runner log
+		// rather than only in the task log.
+		if job.ResolvedInventory != nil && !tsk.Task.IsInventoryResolve() {
+			log.WithFields(log.Fields{
+				"task_id":   job.ID,
+				"runner_id": runner.ID,
+				"context":   "runner",
+			}).Warn("runner progress: resolved inventory reported for a task that is not an inventory resolve, ignoring")
+		} else if job.ResolvedInventory != nil {
+			groups := make(map[string][]string, len(job.ResolvedInventory.Groups))
+			for _, group := range job.ResolvedInventory.Groups {
+				groups[group.Name] = group.Hosts
+			}
+
+			tsk.SetResolvedInventory(job.ResolvedInventory.Hosts, groups)
 		}
 
 		// When the runner reports a terminal status, finalize the task here:

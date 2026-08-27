@@ -295,6 +295,50 @@ type InventoryManager interface {
 	DeleteInventory(projectID int, inventoryID int) error
 }
 
+// InventorySnapshotManager handles the cached host list of an inventory.
+type InventorySnapshotManager interface {
+	// GetInventorySnapshot returns the snapshot state. It reports
+	// ErrNotFound when the inventory has never been synchronised.
+	GetInventorySnapshot(projectID int, inventoryID int) (InventorySnapshot, error)
+
+	GetInventorySnapshotHosts(projectID int, inventoryID int, filter InventoryHostFilter) ([]InventorySnapshotHost, error)
+	GetInventorySnapshotGroups(projectID int, inventoryID int, filter InventoryGroupFilter) ([]InventorySnapshotGroup, error)
+
+	// SetInventorySnapshot replaces the whole snapshot of one inventory in a
+	// single transaction. Concurrent callers on different nodes write the same
+	// derived content, so the loser of the race simply rewrites it.
+	SetInventorySnapshot(snapshot InventorySnapshot, content InventorySnapshotContent) error
+
+	// SetResolvedInventorySnapshot is SetInventorySnapshot for a runner's
+	// resolved host list: it only writes while the pending claim it settles is
+	// still assigned to taskID, the same ownership scoping FailInventorySnapshotResolve
+	// applies. The bool reports whether the write happened; false is not an
+	// error, it means a later refresh already took the claim over.
+	SetResolvedInventorySnapshot(snapshot InventorySnapshot, content InventorySnapshotContent, taskID int) (bool, error)
+
+	// ClaimInventorySnapshotResolve marks an inventory as being resolved by a
+	// runner and reports whether this caller is the one that claimed it. It is
+	// what keeps a second refresh from running somebody's inventory script
+	// again while the first is still in flight, so it must be taken BEFORE the
+	// resolve task is created — a claim taken after would deduplicate nothing.
+	ClaimInventorySnapshotResolve(projectID int, inventoryID int) (bool, error)
+
+	// AssignInventorySnapshotResolveTask records which task a claim ended up
+	// dispatching, so that only that task's outcome can settle the claim.
+	AssignInventorySnapshotResolveTask(projectID int, inventoryID int, taskID int) error
+
+	// ReleaseInventorySnapshotResolve gives up a claim whose task could not be
+	// created. It only touches a pending claim that has no task assigned;
+	// anything else is somebody else's resolve.
+	ReleaseInventorySnapshotResolve(projectID int, inventoryID int, message string) error
+
+	// FailInventorySnapshotResolve settles a claim whose task ended without
+	// producing a host list, so the picker shows an error instead of
+	// "resolving" until the claim expires. It only touches the pending claim
+	// assigned to exactly this task.
+	FailInventorySnapshotResolve(projectID int, inventoryID int, taskID int, message string) error
+}
+
 // RepositoryManager handles repository-related operations
 type RepositoryManager interface {
 	GetRepository(projectID int, repositoryID int) (Repository, error)
@@ -450,6 +494,18 @@ type TaskManager interface {
 	GetProjectTasks(projectID int, params RetrieveQueryParams) ([]TaskWithTpl, error)
 	GetTask(projectID int, taskID int) (Task, error)
 	GetTaskByID(taskID int) (Task, error)
+
+	// GetUnfinishedTasks returns the tasks the database still considers active,
+	// across all projects, oldest first, at most limit of them. It exists for
+	// restart recovery: the pool's live state dies with the process, and these
+	// rows are all that is left of what was running.
+	//
+	// total is how many such rows exist, so a caller that got fewer than that
+	// can say so. The cap is there because `task` is the largest table of a
+	// typical installation and a long-neglected one can hold a lot of stale
+	// unfinished rows; recovery must not turn a restart into a full-table
+	// materialization.
+	GetUnfinishedTasks(limit int) (tasks []Task, total int, err error)
 	DeleteTaskWithOutputs(projectID int, taskID int) error
 	GetTaskOutputs(projectID int, taskID int, params RetrieveQueryParams) ([]TaskOutput, error)
 	CreateTaskOutput(output TaskOutput) (TaskOutput, error)
@@ -579,6 +635,7 @@ type Store interface {
 	ProjectInviteRepository
 	TemplateManager
 	InventoryManager
+	InventorySnapshotManager
 	RepositoryManager
 	EnvironmentManager
 	AccessKeyManager

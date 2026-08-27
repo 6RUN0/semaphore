@@ -1,8 +1,17 @@
 <template>
   <div>
 
+    <LimitPicker
+      v-if="templateParams.allow_override_limit && inventoryId != null"
+      :value="params.limit"
+      @input="setLimit"
+      :project-id="projectId"
+      :inventory-id="inventoryId"
+      :template-id="templateId"
+    />
+
     <ArgsPicker
-      v-if="templateParams.allow_override_limit"
+      v-else-if="templateParams.allow_override_limit"
       :vars="params.limit"
       @change="setLimit"
       :title="$t('limit')"
@@ -99,6 +108,7 @@
 <script>
 
 import ArgsPicker from '@/components/ArgsPicker.vue';
+import LimitPicker from '@/components/LimitPicker.vue';
 
 const APP_PARAMS = {
   ansible: [
@@ -114,11 +124,17 @@ const APP_PARAMS = {
 };
 
 export default {
-  components: { ArgsPicker },
+  components: { ArgsPicker, LimitPicker },
   props: {
     value: Object,
     app: String,
     templateParams: Object,
+    projectId: [Number, String],
+    // Passed straight down to LimitPicker, which accepts a string because
+    // route parameters arrive as one. Narrowing it here would reinstate the
+    // prop warning the child declares its own type to avoid.
+    inventoryId: [Number, String],
+    templateId: [Number, String],
   },
 
   watch: {

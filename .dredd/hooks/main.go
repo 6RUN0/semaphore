@@ -20,6 +20,9 @@ var skipTests = []string{
 	"authentication > /api/auth/login > Performs Login > 204 > application/json",
 	"authentication > /api/auth/logout > Destroys current session > 204 > application/json",
 	"runner > /api/project/{project_id}/runners > Add project runner > 201 > application/json",
+	// The 202 is only reachable for a dynamic inventory, whose resolve needs a
+	// live runner; the dredd fixture is a static inventory and gets the 200.
+	"inventory > /api/project/{project_id}/inventory/{inventory_id}/snapshot/refresh > Rebuild the inventory host list > 202 > application/json",
 }
 
 // Dredd expects that you have already set up the database and run all migrations before it begins.
@@ -110,6 +113,11 @@ func main() {
 	h.Before("inventory > /api/project/{project_id}/inventory/{inventory_id} > Get inventory > 200 > application/json", capabilityWrapper("inventory"))
 	h.Before("inventory > /api/project/{project_id}/inventory/{inventory_id} > Updates inventory > 204 > application/json", capabilityWrapper("inventory"))
 	h.Before("inventory > /api/project/{project_id}/inventory/{inventory_id} > Removes inventory > 204 > application/json", capabilityWrapper("inventory"))
+
+	h.Before("inventory > /api/project/{project_id}/inventory/{inventory_id}/snapshot > Get the state of the inventory host list > 200 > application/json", capabilityWrapper("inventory"))
+	h.Before("inventory > /api/project/{project_id}/inventory/{inventory_id}/snapshot/hosts > Get hosts of the inventory > 200 > application/json", capabilityWrapper("inventory"))
+	h.Before("inventory > /api/project/{project_id}/inventory/{inventory_id}/snapshot/groups > Get groups of the inventory > 200 > application/json", capabilityWrapper("inventory"))
+	h.Before("inventory > /api/project/{project_id}/inventory/{inventory_id}/snapshot/refresh > Rebuild the inventory host list > 200 > application/json", capabilityWrapper("inventory"))
 
 	h.Before("variable-group > /api/project/{project_id}/environment > Add environment > 201 > application/json", capabilityWrapper("environment"))
 	h.Before("variable-group > /api/project/{project_id}/environment/{environment_id} > Get environment > 200 > application/json", capabilityWrapper("environment"))

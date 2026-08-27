@@ -8,6 +8,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/semaphoreui/semaphore/db"
 	"github.com/semaphoreui/semaphore/pkg/tz"
 
 	"github.com/semaphoreui/semaphore/pkg/task_logger"
@@ -32,6 +33,8 @@ type runningJob struct {
 	taskID int
 	job    tasks.Executor
 	commit *CommitInfo
+
+	resolvedInventory *db.InventorySnapshotContent
 
 	statusListeners []task_logger.StatusListener
 	logListeners    []task_logger.LogListener
@@ -102,6 +105,16 @@ func (p *runningJob) SetCommit(hash, message string) {
 	}
 }
 
+// SetResolvedInventory records the host list a resolve job produced, to be
+// reported with the next progress update.
+func (p *runningJob) SetResolvedInventory(hosts []string, groups map[string][]string) {
+	content := db.NewInventorySnapshotContent(hosts, groups)
+
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	p.resolvedInventory = &content
+}
+
 func (p *runningJob) SetStatus(status task_logger.TaskStatus) {
 	p.mu.Lock()
 	if p.status == status {
@@ -132,13 +145,19 @@ func (p *runningJob) getStatus() task_logger.TaskStatus {
 // getProgress atomically snapshots the data needed to report progress to the
 // server. The returned slice is a copy, so the caller can read it freely while
 // the job keeps appending records.
-func (p *runningJob) getProgress() (status task_logger.TaskStatus, logRecords []LogRecord, commit *CommitInfo) {
+func (p *runningJob) getProgress() (
+	status task_logger.TaskStatus,
+	logRecords []LogRecord,
+	commit *CommitInfo,
+	resolvedInventory *db.InventorySnapshotContent,
+) {
 	p.mu.Lock()
 	defer p.mu.Unlock()
 	status = p.status
 	logRecords = make([]LogRecord, len(p.logRecords))
 	copy(logRecords, p.logRecords)
 	commit = p.commit
+	resolvedInventory = p.resolvedInventory
 	return
 }
 
@@ -153,6 +172,28 @@ func (p *runningJob) ackLogRecords(sent int) (pending int) {
 		p.logRecords = nil
 	}
 	return len(p.logRecords)
+}
+
+// ackResolvedInventory clears the resolved inventory the server has
+// acknowledged receiving, the same way ackLogRecords trims acknowledged log
+// records. Without this, getProgress keeps returning the same snapshot on
+// every 1-second poll tick until the task finishes, and the server pays for
+// a full snapshot replace (delete+insert across four tables, up to 20000
+// hosts) on each one.
+//
+// The clear is by pointer identity against what was actually sent, not an
+// unconditional wipe: if the job resolved a new inventory (e.g. a fresh
+// resolve step) between send and ack, p.resolvedInventory already points at
+// that newer content and must survive the ack for the stale send.
+func (p *runningJob) ackResolvedInventory(sent *db.InventorySnapshotContent) {
+	if sent == nil {
+		return
+	}
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	if p.resolvedInventory == sent {
+		p.resolvedInventory = nil
+	}
 }
 
 func (p *runningJob) logPipe(reader io.Reader) {

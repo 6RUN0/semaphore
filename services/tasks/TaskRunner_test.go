@@ -18,6 +18,7 @@ import (
 	"github.com/semaphoreui/semaphore/db_lib"
 
 	"github.com/semaphoreui/semaphore/db"
+	"github.com/semaphoreui/semaphore/pkg/keylock"
 	"github.com/semaphoreui/semaphore/util"
 )
 
@@ -171,7 +172,7 @@ func TestTaskRunnerRun(t *testing.T) {
 		Environment:  taskRunner.Environment,
 		Logger:       &taskRunner,
 		KeyInstaller: keyInstaller,
-		RepoLock:     &KeyLock{},
+		RepoLock:     &keylock.KeyLock{},
 		App: &db_lib.AnsibleApp{
 			Template:   taskRunner.Template,
 			Repository: taskRunner.Repository,

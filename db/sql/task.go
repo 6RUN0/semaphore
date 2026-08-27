@@ -3,6 +3,7 @@ package sql
 import (
 	"encoding/json"
 	"math/rand"
+	"strings"
 	"time"
 
 	"github.com/Masterminds/squirrel"
@@ -449,4 +450,40 @@ func (d *SqlDb) GetNodeCount() (int, error) {
 
 func (d *SqlDb) GetUiCount() (int, error) {
 	return 1, nil
+}
+
+func (d *SqlDb) GetUnfinishedTasks(limit int) (tasks []db.Task, total int, err error) {
+	statuses := task_logger.UnfinishedTaskStatuses()
+
+	placeholders := make([]string, len(statuses))
+	args := make([]any, len(statuses))
+
+	for i, status := range statuses {
+		placeholders[i] = "?"
+		args[i] = status
+	}
+
+	// The index task__status (migration 2.20.3) is what keeps both queries off
+	// a scan of the largest table in the database.
+	condition := " from task where status in (" + strings.Join(placeholders, ",") + ")"
+
+	count, err := d.Sql().SelectInt(d.PrepareQuery("select count(1)"+condition), args...)
+	if err != nil {
+		return
+	}
+	total = int(count)
+
+	// Oldest first: if there are more unfinished rows than the caller asked
+	// for, the ones left over are the freshest, which are also the ones most
+	// likely to be settled by something else (a live runner's next report).
+	//
+	// selectAll runs PrepareQuery itself; only the raw ? placeholders belong
+	// here, like everywhere else in this file.
+	_, err = d.selectAll(
+		&tasks,
+		"select *"+condition+" order by id limit ?",
+		append(args, limit)...,
+	)
+
+	return
 }

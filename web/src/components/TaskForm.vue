@@ -176,6 +176,9 @@
       v-model="item.params"
       :app="template.app"
       :template-params="template.task_params || {}"
+      :project-id="projectId"
+      :inventory-id="inventory_id"
+      :template-id="template.id"
     />
 
     <TaskParamsTerraformForm

@@ -611,6 +611,52 @@ definitions:
         type: string
         enum: [static, static-yaml, file, terraform-workspace]
 
+  InventorySnapshot:
+    type: object
+    properties:
+      inventory_id:
+        type: integer
+      project_id:
+        type: integer
+      status:
+        type: string
+        description: >
+          ok when the host list was built, unsupported when the inventory type
+          is one the server cannot enumerate without a runner, error when the
+          content could not be parsed, pending when a runner has been asked to
+          list the hosts and has not answered yet.
+        enum: [ok, error, unsupported, pending]
+      error:
+        type: string
+        description: Why the host list could not be built; empty when status is ok.
+      host_count:
+        type: integer
+      created:
+        type: string
+        format: date-time
+      task_id:
+        type: integer
+        x-nullable: true
+
+  InventorySnapshotHost:
+    type: object
+    properties:
+      name:
+        type: string
+        example: web01.example.com
+
+  InventorySnapshotGroup:
+    type: object
+    properties:
+      name:
+        type: string
+        example: web
+      host_count:
+        type: integer
+        description: >
+          Hosts reachable through the group, including those contributed by its
+          child groups.
+
   Integration:
     type: object
     properties:
@@ -2925,6 +2971,174 @@ paths:
       responses:
         204:
           description: inventory removed
+
+  /project/{project_id}/inventory/{inventory_id}/snapshot:
+    parameters:
+      - $ref: "#/parameters/project_id"
+      - $ref: "#/parameters/inventory_id"
+    get:
+      tags:
+        - inventory
+      summary: Get the state of the inventory host list
+      description: >
+        The host list is rebuilt whenever the inventory content changes, so the
+        snapshot always describes the inventory as it stands. For an inventory
+        held in a repository the current commit decides that, which costs no
+        fetch while it has not moved.
+      parameters:
+        - name: template_id
+          in: query
+          required: false
+          type: integer
+          description: >
+            The template the host list is being picked for. It resolves a file
+            inventory that names no repository of its own, whose path belongs to
+            the repository of the template running it.
+      responses:
+        200:
+          description: >
+            The inventory snapshot. host_count describes the host rows stored
+            right now, whatever status says: a resolve in flight, and one that
+            failed, keep the list the previous resolve produced.
+          schema:
+            $ref: "#/definitions/InventorySnapshot"
+        404:
+          description: Inventory not found
+        500:
+          description: The snapshot could not be read or written
+
+  /project/{project_id}/inventory/{inventory_id}/snapshot/hosts:
+    parameters:
+      - $ref: "#/parameters/project_id"
+      - $ref: "#/parameters/inventory_id"
+    get:
+      tags:
+        - inventory
+      summary: Get hosts of the inventory
+      parameters:
+        - name: template_id
+          in: query
+          required: false
+          type: integer
+          description: the template the host list is being picked for
+        - name: group
+          in: query
+          required: false
+          type: string
+          description: >
+            Only hosts reachable through this group. Cut to the width of a host
+            name, since nothing longer can name a group that exists.
+        - name: search
+          in: query
+          required: false
+          type: string
+          description: >
+            Only hosts whose name contains this text, matched without regard to
+            case. Cut to the width of a host name.
+        - name: limit
+          in: query
+          required: false
+          type: integer
+          description: page size, capped by the server
+        - name: offset
+          in: query
+          required: false
+          type: integer
+      responses:
+        200:
+          description: hosts
+          schema:
+            type: array
+            items:
+              $ref: "#/definitions/InventorySnapshotHost"
+        404:
+          description: Inventory not found
+        500:
+          description: The snapshot could not be read or written
+
+  /project/{project_id}/inventory/{inventory_id}/snapshot/groups:
+    parameters:
+      - $ref: "#/parameters/project_id"
+      - $ref: "#/parameters/inventory_id"
+    get:
+      tags:
+        - inventory
+      summary: Get groups of the inventory
+      parameters:
+        - name: template_id
+          in: query
+          required: false
+          type: integer
+          description: >
+            The template the host list is being picked for. It resolves a file
+            inventory that names no repository of its own, whose path belongs to
+            the repository of the template running it.
+        - name: limit
+          in: query
+          required: false
+          type: integer
+          description: page size, capped by the server
+        - name: offset
+          in: query
+          required: false
+          type: integer
+      responses:
+        200:
+          description: one page of groups, ordered by name
+          schema:
+            type: array
+            items:
+              $ref: "#/definitions/InventorySnapshotGroup"
+        404:
+          description: Inventory not found
+        500:
+          description: The snapshot could not be read or written
+
+  /project/{project_id}/inventory/{inventory_id}/snapshot/refresh:
+    parameters:
+      - $ref: "#/parameters/project_id"
+      - $ref: "#/parameters/inventory_id"
+    post:
+      tags:
+        - inventory
+      summary: Rebuild the inventory host list
+      description: >
+        Rebuilds the host list even when the inventory content has not changed.
+      parameters:
+        - name: template_id
+          in: query
+          required: false
+          type: integer
+          description: >
+            The template the host list is being picked for. It resolves a file
+            inventory that names no repository of its own, whose path belongs to
+            the repository of the template running it.
+      responses:
+        200:
+          description: >
+            The rebuilt host list, or the state of a resolve already in flight.
+          schema:
+            $ref: "#/definitions/InventorySnapshot"
+        202:
+          description: >
+            The hosts can only be listed by running a program, and a resolve
+            task has been dispatched to a runner; the snapshot is pending and
+            names the task.
+          schema:
+            $ref: "#/definitions/InventorySnapshot"
+        400:
+          description: >
+            The inventory needs a runner but no template_id was given, the
+            template is not an Ansible template, or the template does not allow
+            its inventory to be overridden and so would resolve its own.
+        403:
+          description: >
+            The caller may not run tasks of this template, which listing the
+            hosts of this inventory requires.
+        404:
+          description: Inventory or template not found
+        500:
+          description: The resolve task could not be queued
 
   # project environment
   /project/{project_id}/environment:

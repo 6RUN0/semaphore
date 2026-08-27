@@ -281,6 +281,57 @@ func TestJobPool_ReusesConnections(t *testing.T) {
 	assert.Equal(t, int32(1), atomic.LoadInt32(&newConns))
 }
 
+// TestJobPool_ResolvedInventorySentOnce guards against the resend bug: a
+// resolved inventory report costs the server a full snapshot replace (up to
+// 20000 hosts, delete+insert across four tables), so it must be sent exactly
+// once and dropped from later poll cycles once the server has acknowledged
+// the PUT, the same way log records are trimmed on ack.
+func TestJobPool_ResolvedInventorySentOnce(t *testing.T) {
+	prevCfg := util.Config
+	t.Cleanup(func() { util.Config = prevCfg })
+
+	var mu sync.Mutex
+	var received []JobProgress
+
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		var body RunnerProgress
+		require.NoError(t, json.NewDecoder(r.Body).Decode(&body))
+
+		mu.Lock()
+		received = append(received, body.Jobs...)
+		mu.Unlock()
+
+		w.WriteHeader(http.StatusNoContent)
+	}))
+	t.Cleanup(srv.Close)
+
+	util.Config = &util.ConfigType{
+		WebHost: srv.URL,
+		Runner: &util.RunnerConfig{
+			Token:      "test-token",
+			Executor:   &util.ExecutorConfig{},
+			Connection: &util.RunnerConnectionConfig{},
+		},
+	}
+
+	p := NewJobPool(nil)
+
+	lj := &tasks.LocalExecutor{Task: db.Task{ID: 1}}
+	rj := &runningJob{job: lj, status: task_logger.TaskRunningStatus}
+	lj.Logger = rj
+	rj.SetResolvedInventory([]string{"web01", "db01"}, map[string][]string{"web": {"web01"}})
+	p.addRunningJob(1, rj)
+
+	require.True(t, p.sendProgress())
+	require.True(t, p.sendProgress())
+	require.True(t, p.sendProgress())
+
+	require.Len(t, received, 3)
+	require.NotNil(t, received[0].ResolvedInventory, "the first report must carry the resolved inventory")
+	assert.Nil(t, received[1].ResolvedInventory, "the server already acknowledged it, must not be resent")
+	assert.Nil(t, received[2].ResolvedInventory, "must stay unset on subsequent polls")
+}
+
 func TestJobPool_checkNewJobs_ExecutorErrorWithoutCacheCleanProjectID(t *testing.T) {
 	prevCfg := util.Config
 	t.Cleanup(func() { util.Config = prevCfg })

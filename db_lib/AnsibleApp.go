@@ -64,7 +64,40 @@ func (t *AnsibleApp) SetLogger(logger task_logger.Logger) task_logger.Logger {
 func (t *AnsibleApp) Run(args LocalAppRunningArgs) error {
 	// Use "default" key for backward compatibility
 	cliArgs := args.CliArgs["default"]
+
+	if params, ok := args.TaskParams.(*db.AnsibleTaskParams); ok && params != nil && params.ResolveInventoryOnly {
+		return t.resolveInventory(cliArgs, args.EnvironmentVars)
+	}
+
 	return t.Playbook.RunPlaybook(cliArgs, args.EnvironmentVars, args.Inputs, args.Callback)
+}
+
+// resolveInventory lists the hosts of an inventory instead of running a play,
+// and reports the names it found. It is the only way the hosts of a dynamic
+// inventory are ever learned: listing them runs a program from the repository,
+// which is a runner's job and never the server's.
+func (t *AnsibleApp) resolveInventory(args []string, environmentVars []string) error {
+	t.Log("Resolving the inventory host list.\n")
+
+	output, err := t.Playbook.RunInventoryListing(args, environmentVars)
+	if err != nil {
+		return err
+	}
+
+	resolved, err := ParseInventoryListing(output)
+	if err != nil {
+		return err
+	}
+
+	groups := make(map[string][]string, len(resolved.Groups))
+	for _, group := range resolved.Groups {
+		groups[group.Name] = group.Hosts
+	}
+
+	t.Logger.SetResolvedInventory(resolved.Hosts, groups)
+	t.Logger.Logf("Resolved %d hosts in %d groups.\n", len(resolved.Hosts), len(groups))
+
+	return nil
 }
 
 func (t *AnsibleApp) Log(msg string) {

@@ -387,6 +387,12 @@ func (t *TaskRunner) startAutorunTasks() {
 		return
 	}
 
+	// An inventory resolve borrows the template to list hosts; succeeding at
+	// that is not the "build succeeded" its autorun children are waiting for.
+	if t.Task.IsInventoryResolve() {
+		return
+	}
+
 	tpls, err := t.pool.store.GetTemplates(t.Task.ProjectID, db.TemplateFilter{
 		BuildTemplateID: &t.Task.TemplateID,
 		AutorunOnly:     true,

@@ -8,6 +8,7 @@ import (
 	"os/exec"
 	"time"
 
+	"github.com/semaphoreui/semaphore/db"
 	"github.com/semaphoreui/semaphore/pkg/tz"
 
 	"github.com/semaphoreui/semaphore/api/sockets"
@@ -79,6 +80,61 @@ func (t *TaskRunner) SetCommit(hash, message string) {
 	}
 }
 
+// SetResolvedInventory stores a host list a runner produced by executing a
+// dynamic inventory.
+//
+// The inventory it is stored against comes from the task row on this side, not
+// from the report, so a runner can only ever affect the inventory its own task
+// named. A task that resolved nothing has no inventory and is ignored.
+//
+// The IsInventoryResolve check is what keeps an ordinary playbook run from
+// overwriting an inventory's snapshot at all: db.Task.Params is written by the
+// server, never by the runner, so this is a server-side decision even though
+// it runs in response to the runner's report.
+func (t *TaskRunner) SetResolvedInventory(hosts []string, groups map[string][]string) {
+	if !t.Task.IsInventoryResolve() {
+		t.Log("resolved inventory reported for a task that is not an inventory resolve, ignoring")
+		return
+	}
+
+	content := db.NewInventorySnapshotContent(hosts, groups)
+
+	if t.Task.InventoryID == nil {
+		t.Log("resolved inventory reported for a task that has no inventory, ignoring")
+		return
+	}
+
+	// The inventory the task asked for is not always the one that ran:
+	// populateDetails substitutes the template's own inventory when the
+	// template forbids overriding it. Storing the result under the requested
+	// id would fill inventory A with the hosts of inventory B and then freeze
+	// it, because a stored snapshot is not rebuilt until someone refreshes it
+	// by hand. t.Inventory is what ansible was actually pointed at, so it has
+	// to agree.
+	if t.Inventory.ID != *t.Task.InventoryID {
+		t.Log("resolved inventory belongs to a different inventory than the task requested, ignoring")
+		return
+	}
+
+	if t.pool == nil {
+		return
+	}
+
+	err := t.pool.inventorySnapshotService.StoreResolved(
+		t.Task.ProjectID,
+		*t.Task.InventoryID,
+		t.Task.ID,
+		content,
+	)
+
+	if err != nil {
+		// A host list that cannot be stored must not fail the task that
+		// produced it: the play itself ran, and the picker simply keeps
+		// whatever it had.
+		t.Log("failed to store the resolved inventory: " + err.Error())
+	}
+}
+
 func (t *TaskRunner) SetStatus(status task_logger.TaskStatus) {
 	if status == t.Task.Status {
 		return
@@ -122,18 +178,25 @@ func (t *TaskRunner) SetStatus(status task_logger.TaskStatus) {
 		localJob.SetStatus(status)
 	}
 
-	if status == task_logger.TaskFailStatus {
-		t.sendMailAlert()
+	// An inventory resolve is the host picker's errand, not a run anyone
+	// subscribed to: "Task #N succeeded" on every refresh would train people
+	// to ignore the real ones. Its failure surfaces on the snapshot instead.
+	if !t.Task.IsInventoryResolve() {
+		if status == task_logger.TaskFailStatus {
+			t.sendMailAlert()
+		}
+
+		if status.IsNotifiable() {
+			t.sendTelegramAlert()
+			t.sendSlackAlert()
+			t.sendRocketChatAlert()
+			t.sendMicrosoftTeamsAlert()
+			t.sendDingTalkAlert()
+			t.sendGotifyAlert()
+		}
 	}
 
-	if status.IsNotifiable() {
-		t.sendTelegramAlert()
-		t.sendSlackAlert()
-		t.sendRocketChatAlert()
-		t.sendMicrosoftTeamsAlert()
-		t.sendDingTalkAlert()
-		t.sendGotifyAlert()
-	}
+	t.settleInventoryResolve(status)
 
 	for _, l := range t.statusListeners {
 		l(status)
@@ -144,6 +207,42 @@ func (t *TaskRunner) SetStatus(status task_logger.TaskStatus) {
 		"context": "task_logger",
 		"status":  status,
 	}).Info("Task status updated")
+}
+
+// settleInventoryResolve closes out the pending snapshot claim of an inventory
+// resolve whose task died without producing a host list. Without it the picker
+// would show "resolving" until the claim's 30-minute expiry, with no error and
+// no way to retry (issue class: a typo in the inventory script).
+//
+// A successful resolve needs nothing here: StoreResolved has already replaced
+// the pending row. The store call is scoped to this task's own claim, so a
+// claim that expired and was taken over by a later refresh stays untouched.
+func (t *TaskRunner) settleInventoryResolve(status task_logger.TaskStatus) {
+	if !status.IsFinished() || status == task_logger.TaskSuccessStatus {
+		return
+	}
+
+	if !t.Task.IsInventoryResolve() || t.Task.InventoryID == nil {
+		return
+	}
+
+	if t.pool == nil {
+		return
+	}
+
+	err := t.pool.store.FailInventorySnapshotResolve(
+		t.Task.ProjectID,
+		*t.Task.InventoryID,
+		t.Task.ID,
+		"the resolve task ended with status "+string(status),
+	)
+
+	if err != nil {
+		log.WithError(err).WithFields(log.Fields{
+			"task_id": t.Task.ID,
+			"context": "task_logger",
+		}).Warn("failed to settle the inventory resolve claim")
+	}
 }
 
 func (t *TaskRunner) panicOnError(err error, msg string) {
