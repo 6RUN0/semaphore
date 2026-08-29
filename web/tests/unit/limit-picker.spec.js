@@ -10,12 +10,6 @@ localVue.use(Vuetify);
 // Mounting without an inventory keeps load() and loadHosts() from reaching the
 // network: both return immediately when there is nothing to load, so no method
 // has to be stubbed away.
-//
-// Only script behaviour is asserted. Under mochapack the template block of an
-// SFC does not produce a render function ("export 'render' was not found"), so
-// wrapper.html() is empty for every component in this repository, the existing
-// args-picker.spec.js included. Nothing here may depend on rendering until
-// that is fixed.
 function mountPicker(propsData = {}) {
   return shallowMount(LimitPicker, {
     localVue,
