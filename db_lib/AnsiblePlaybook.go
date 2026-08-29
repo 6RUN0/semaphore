@@ -49,16 +49,15 @@ func (p AnsiblePlaybook) makeCmd(command string, args []string, environmentVars 
 
 func (p AnsiblePlaybook) runCmd(command string, args []string, environmentVars []string) error {
 	cmd := p.makeCmd(command, args, environmentVars)
-	p.Logger.LogCmd(cmd)
-	err := cmd.Run()
-	// Wait for all log processing to complete before returning
-	p.Logger.WaitLog()
-	return err
+	finishLog := p.Logger.LogCmd(cmd)
+	defer finishLog()
+	return cmd.Run()
 }
 
 func (p AnsiblePlaybook) RunPlaybook(args []string, environmentVars []string, inputs map[string]string, cb func(*os.Process)) error {
 	cmd := p.makeCmd("ansible-playbook", args, environmentVars)
-	p.Logger.LogCmd(cmd)
+	finishLog := p.Logger.LogCmd(cmd)
+	defer finishLog()
 
 	ptmx, err := pty.Start(cmd)
 
@@ -93,8 +92,6 @@ func (p AnsiblePlaybook) RunPlaybook(args []string, environmentVars []string, in
 	defer func() { _ = ptmx.Close() }()
 	cb(cmd.Process)
 	err = cmd.Wait()
-	// Wait for all log processing to complete before returning
-	p.Logger.WaitLog()
 	return err
 }
 
@@ -254,11 +251,12 @@ func (p AnsiblePlaybook) RunInventoryListing(args []string, environmentVars []st
 
 	waitErr := cmd.Wait()
 
+	// Logged directly rather than through LogCmd: that attaches both streams,
+	// and stdout here is the listing itself, which carries every host variable.
+	// Delivery is asynchronous and there is nothing left to wait on for it —
+	// what the logger hands to its own writer is out of this call's hands.
 	if !stderr.empty() {
 		p.Logger.Log(stderr.text())
-		// Diagnostics are the only thing this run writes to the task log, and
-		// the task may be finalized as soon as it returns.
-		p.Logger.WaitLog()
 	}
 
 	switch {

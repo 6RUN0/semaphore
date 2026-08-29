@@ -54,7 +54,9 @@ func (l *recordingLogger) LogfWithTime(_ time.Time, format string, a ...any) {
 // LogCmd attaches to the command's output the way a real task logger does.
 // Inheriting the no-op from NopLogger would make this whole file blind to the
 // one mistake it exists to catch — wiring the listing through the log.
-func (l *recordingLogger) LogCmd(cmd *exec.Cmd) {
+// The returned finalizer waits for both readers, which is what the interface
+// promises the caller may do after the command stops writing.
+func (l *recordingLogger) LogCmd(cmd *exec.Cmd) func() {
 	stdout, _ := cmd.StdoutPipe()
 	stderr, _ := cmd.StderrPipe()
 
@@ -76,10 +78,8 @@ func (l *recordingLogger) LogCmd(cmd *exec.Cmd) {
 			}
 		}(pipe)
 	}
-}
 
-func (l *recordingLogger) WaitLog() {
-	l.wg.Wait()
+	return l.wg.Wait
 }
 
 func (l *recordingLogger) SetResolvedInventory(hosts []string, groups map[string][]string) {

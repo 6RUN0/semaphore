@@ -2,6 +2,7 @@ package runners
 
 import (
 	"fmt"
+	"os/exec"
 	"sync"
 	"testing"
 	"time"
@@ -126,6 +127,29 @@ func TestRunningJob_AckResolvedInventory(t *testing.T) {
 		_, _, _, resolvedInventory := rj.getProgress()
 		assert.NotNil(t, resolvedInventory)
 	})
+}
+
+func TestRunningJob_LogCmdUsesWaitDelayForInheritedPipes(t *testing.T) {
+	if _, err := exec.LookPath("bash"); err != nil {
+		t.Skip("bash is not available")
+	}
+
+	rj := newTestRunningJob(1)
+	cmd := exec.Command("bash", "-c", "printf 'stdout'; printf 'stderr' >&2; sleep 2 &")
+	cmd.WaitDelay = 50 * time.Millisecond
+	finishLog := rj.LogCmd(cmd)
+	defer finishLog()
+
+	startedAt := time.Now()
+	err := cmd.Run()
+	finishLog()
+
+	require.ErrorIs(t, err, exec.ErrWaitDelay)
+	assert.Less(t, time.Since(startedAt), 1500*time.Millisecond)
+
+	_, logs, _, _ := rj.getProgress()
+	require.Len(t, logs, 2)
+	assert.ElementsMatch(t, []string{"stdout", "stderr"}, []string{logs[0].Message, logs[1].Message})
 }
 
 func TestRunningJob_GetProgressReturnsCopy(t *testing.T) {

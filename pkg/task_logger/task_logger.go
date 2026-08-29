@@ -132,7 +132,9 @@ type Logger interface {
 	Logf(format string, a ...any)
 	LogWithTime(now time.Time, msg string)
 	LogfWithTime(now time.Time, format string, a ...any)
-	LogCmd(cmd *exec.Cmd)
+	// LogCmd attaches output logging and returns an idempotent finalizer that
+	// must be called after the command stops writing, including if Start fails.
+	LogCmd(cmd *exec.Cmd) func()
 	SetStatus(status TaskStatus)
 	AddStatusListener(l StatusListener)
 	AddLogListener(l LogListener)
@@ -144,8 +146,6 @@ type Logger interface {
 	// so the reduction happens before this is called. Primitives rather than a
 	// model type because db already depends on this package.
 	SetResolvedInventory(hosts []string, groups map[string][]string)
-
-	WaitLog()
 }
 
 // NopLogger is a no-op Logger, useful for git operations triggered outside of
@@ -157,10 +157,9 @@ func (NopLogger) Log(string)                                         {}
 func (NopLogger) Logf(string, ...any)                                {}
 func (NopLogger) LogWithTime(time.Time, string)                      {}
 func (NopLogger) LogfWithTime(time.Time, string, ...any)             {}
-func (NopLogger) LogCmd(*exec.Cmd)                                   {}
+func (NopLogger) LogCmd(*exec.Cmd) func()                            { return func() {} }
 func (NopLogger) SetStatus(TaskStatus)                               {}
 func (NopLogger) AddStatusListener(StatusListener)                   {}
 func (NopLogger) AddLogListener(LogListener)                         {}
 func (NopLogger) SetCommit(string, string)                           {}
 func (NopLogger) SetResolvedInventory([]string, map[string][]string) {}
-func (NopLogger) WaitLog()                                           {}

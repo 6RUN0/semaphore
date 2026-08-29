@@ -17,8 +17,9 @@ func TestLogPipeAcceptsLongLines(t *testing.T) {
 	runner := &TaskRunner{pool: &TaskPool{logger: make(chan logRecord, 8)}}
 	line := strings.Repeat("x", 1024*1024)
 
+	// logPipe returns once its own reader goroutine is done, so everything it
+	// accepted is already in the channel below.
 	runner.logPipe(strings.NewReader(line + "\nshort\n"))
-	runner.logWG.Wait()
 
 	require.Len(t, runner.pool.logger, 2, "a line under the limit must not be dropped")
 	first := <-runner.pool.logger
