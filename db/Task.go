@@ -92,6 +92,20 @@ type Task struct {
 
 	// Limit is deprecated, use Params.Limit instead
 	Limit string `db:"-" json:"limit"`
+
+	// TargetHostVar is the name of the extra variable the picked hosts are
+	// published under, resolved from the server's configuration and carried to
+	// whichever process executes the task. It travels rather than being read
+	// from util.Config by the executor because a remote runner is a separate
+	// process with its own configuration file: reading it there would make the
+	// setting silently ineffective on every runner it was not copied to, and
+	// make one template behave differently depending on which node picked the
+	// task up.
+	//
+	// Not persisted, and stamped unconditionally by TaskRunner.populateDetails:
+	// the field is bound from the request body like the rest of the task, so a
+	// value the caller supplied must never survive.
+	TargetHostVar string `db:"-" json:"target_host_var,omitempty"`
 }
 
 func (task *Task) ExtractParams(target any) (err error) {
@@ -222,7 +236,19 @@ func (task *Task) ValidateNewTask(template Template) error {
 		params = &DefaultTaskParams{}
 	}
 
-	return task.ExtractParams(params)
+	if err := task.ExtractParams(params); err != nil {
+		return err
+	}
+
+	if ansibleParams, ok := params.(*AnsibleTaskParams); ok {
+		if err := ValidateAnsibleLimit(ansibleParams.Limit, "task"); err != nil {
+			return err
+		}
+
+		return ValidateTaskEnvironment(task.Environment)
+	}
+
+	return nil
 }
 
 func (task *TaskWithTpl) Fill(d Store) error {

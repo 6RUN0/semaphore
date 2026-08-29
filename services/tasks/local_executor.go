@@ -185,10 +185,77 @@ func (t *LocalExecutor) getEnvironmentExtraVars(username string, incomingVersion
 	return
 }
 
-func (t *LocalExecutor) getEnvironmentExtraVarsJSON(username string, incomingVersion *string) (str string, err error) {
+// effectiveAnsibleLimit is the host pattern the run is restricted to: the
+// template's own value, replaced by the task's when the template allows it.
+// Empty means the play is not restricted at all.
+//
+// Extracted rather than inlined because the pattern is needed twice: for
+// --limit and, so that a playbook can select hosts through a variable, for the
+// extra vars. Deriving it twice would let the two disagree.
+func effectiveAnsibleLimit(tplParams db.AnsibleTemplateParams, params db.AnsibleTaskParams) string {
+	if tplParams.AllowOverrideLimit && params.Limit != nil {
+		return strings.Join(params.Limit, ",")
+	}
+
+	return strings.Join(tplParams.Limit, ",")
+}
+
+// getEnvironmentExtraVarsJSON renders the extra vars of an Ansible task. The
+// limit is the host pattern the task form produced, empty when the run is not
+// restricted to particular hosts.
+//
+// The alias name comes from the task (stamped by the server, see
+// db.Task.TargetHostVar) and not from util.Config, because this runs in the
+// process that executes the task, which for a remote runner is not the process
+// that was configured.
+func (t *LocalExecutor) getEnvironmentExtraVarsJSON(username string, incomingVersion *string, limit string) (str string, err error) {
 	extraVars, err := t.getEnvironmentExtraVars(username, incomingVersion)
 	if err != nil {
 		return
+	}
+
+	// The alias names a variable Semaphore owns, so it is cleared whatever the
+	// limit turns out to be. Leaving it alone when nothing is picked would let a
+	// value the caller placed in task.environment under that name reach the
+	// playbook as if Semaphore had selected the hosts — and it would do so
+	// exactly when the template forbids overriding the limit, since that is a
+	// case which produces an empty one.
+	name := t.Task.TargetHostVar
+	if name != "" {
+		if _, taken := extraVars[name]; taken {
+			// The name is configured server-wide while the colliding variable
+			// belongs to one project, so the clash is invisible to whoever set
+			// either of them. Without this line the symptom is a project variable
+			// that inexplicably holds a list of hosts.
+			t.Log(fmt.Sprintf(
+				"Variable %q is reserved for the picked hosts (target_host_var) and its environment value is ignored",
+				name))
+		}
+
+		delete(extraVars, name)
+	}
+
+	// An empty limit leaves both variables undefined rather than setting them to
+	// an empty string. Jinja's default() replaces an undefined value and not an
+	// empty one, so hosts: "{{ picked | default('all') }}" would otherwise match
+	// no host at all the moment nothing was picked.
+	if limit != "" {
+		if vars, ok := extraVars["semaphore_vars"].(map[string]any); ok {
+			vars["limit"] = limit
+		} else {
+			// Unreachable while getEnvironmentExtraVars assigns semaphore_vars
+			// last and unconditionally. Reported rather than ignored: losing the
+			// canonical variable sends a play that selects hosts through it to
+			// default('all') — the whole inventory — and a silent skip would
+			// leave nothing in the task log to explain why.
+			t.Log("semaphore_vars is missing from the extra vars, semaphore_vars.limit was not set")
+		}
+
+		// The alias is what lets an existing playbook keep its own variable name
+		// instead of being rewritten around semaphore_vars.
+		if name != "" {
+			extraVars[name] = limit
+		}
 	}
 
 	ev, err := json.Marshal(extraVars)
@@ -631,7 +698,11 @@ func (t *LocalExecutor) getPlaybookArgs(username string, incomingVersion *string
 		}
 	}
 
-	extraVars, err := t.getEnvironmentExtraVarsJSON(username, incomingVersion)
+	// Computed here rather than next to the other host-selection arguments below
+	// because the extra vars carry it too, and they are rendered first.
+	limit := effectiveAnsibleLimit(tplParams, params)
+
+	extraVars, err := t.getEnvironmentExtraVarsJSON(username, incomingVersion, limit)
 	if err != nil {
 		t.Log(err.Error())
 		t.Log("Could not remove command environment, if existent it will be passed to --extra-vars. This is not fatal but be aware of side effects")
@@ -652,15 +723,10 @@ func (t *LocalExecutor) getPlaybookArgs(username string, incomingVersion *string
 		return
 	}
 
-	var limit string
 	var tags string
 	var skipTags string
 
 	// Fill fields from template
-	if len(tplParams.Limit) > 0 {
-		limit = strings.Join(tplParams.Limit, ",")
-	}
-
 	if len(tplParams.Tags) > 0 {
 		tags = strings.Join(tplParams.Tags, ",")
 	}
@@ -670,10 +736,6 @@ func (t *LocalExecutor) getPlaybookArgs(username string, incomingVersion *string
 	}
 
 	// Fill fields from task
-
-	if tplParams.AllowOverrideLimit && params.Limit != nil {
-		limit = strings.Join(params.Limit, ",")
-	}
 
 	if tplParams.AllowOverrideTags && params.Tags != nil {
 		tags = strings.Join(params.Tags, ",")

@@ -14,6 +14,7 @@ import (
 	"github.com/semaphoreui/semaphore/pkg/task_logger"
 	"github.com/semaphoreui/semaphore/pro_interfaces"
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 
 	"github.com/semaphoreui/semaphore/db_lib"
 
@@ -806,4 +807,81 @@ func TestTaskRunner_populateTaskEnvironment(t *testing.T) {
 	}
 
 	assert.Equal(t, tsk.Environment.JSON, "{\"a\":11,\"b\":22,\"c\":33,\"d\":4}")
+}
+
+// newPopulateDetailsRunner builds the minimum a task needs for populateDetails
+// to reach the end: a project with a repository, an inventory and a template.
+//
+// The caller sets util.Config.TargetHostVar, which is process-wide, so it is
+// restored here — the tests in this package share the config and run in one
+// goroutine each, but not in a defined order.
+func newPopulateDetailsRunner(t *testing.T) *TaskRunner {
+	t.Helper()
+
+	store := sql.InitConfigCreateTestStore()
+
+	prevTargetHostVar := util.Config.TargetHostVar
+	t.Cleanup(func() { util.Config.TargetHostVar = prevTargetHostVar })
+
+	proj, err := store.CreateProject(db.Project{})
+	require.NoError(t, err)
+
+	key, err := store.CreateAccessKey(db.AccessKey{ProjectID: &proj.ID, Type: db.AccessKeyNone})
+	require.NoError(t, err)
+
+	repo, err := store.CreateRepository(db.Repository{
+		ProjectID: proj.ID,
+		SSHKeyID:  key.ID,
+		Name:      "Test",
+		GitURL:    "git@example.com:test/test",
+		GitBranch: "master",
+	})
+	require.NoError(t, err)
+
+	inv, err := store.CreateInventory(db.Inventory{ProjectID: proj.ID})
+	require.NoError(t, err)
+
+	tpl, err := store.CreateTemplate(db.Template{
+		Name:         "Test",
+		Playbook:     "test.yml",
+		ProjectID:    proj.ID,
+		RepositoryID: repo.ID,
+		InventoryID:  &inv.ID,
+	})
+	require.NoError(t, err)
+
+	return &TaskRunner{
+		pool: &TaskPool{
+			store:             store,
+			inventoryService:  &InventoryServiceMock{},
+			encryptionService: &EncryptionServiceMock{},
+		},
+		Task: db.Task{TemplateID: tpl.ID, ProjectID: proj.ID},
+	}
+}
+
+// The runner process has a configuration file of its own that knows nothing
+// about this setting, so the name has to be resolved here, on the server, and
+// travel with the task.
+func TestPopulateDetailsStampsTargetHostVar(t *testing.T) {
+	tsk := newPopulateDetailsRunner(t)
+	util.Config.TargetHostVar = "involved_hosts"
+
+	require.NoError(t, tsk.populateDetails())
+
+	assert.Equal(t, "involved_hosts", tsk.Task.TargetHostVar)
+}
+
+// db.Task is bound straight from the request body, so the field arrives caller-
+// controlled. Were it merely defaulted instead of overwritten, anyone allowed to
+// run a task could name the variable the picked hosts are published under — an
+// ansible_ name among them, which validateTargetHostVar exists to forbid.
+func TestPopulateDetailsOverwritesCallerSuppliedTargetHostVar(t *testing.T) {
+	tsk := newPopulateDetailsRunner(t)
+	tsk.Task.TargetHostVar = "ansible_user"
+	util.Config.TargetHostVar = ""
+
+	require.NoError(t, tsk.populateDetails())
+
+	assert.Empty(t, tsk.Task.TargetHostVar)
 }

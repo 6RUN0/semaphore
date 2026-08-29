@@ -85,6 +85,10 @@ func getAdminInfo(w http.ResponseWriter, r *http.Request) {
 		"go_os":         runtime.GOOS,
 		"tmp_path":      util.Config.TmpPath,
 		"home_dir_mode": util.Config.HomeDirMode,
+		// Reported because the name is chosen server-side but consumed in
+		// playbooks: without it, whoever writes the playbook has no way to learn
+		// which variable carries the picked hosts short of reading the config file.
+		"target_host_var": util.Config.TargetHostVar,
 	}
 
 	if util.Config.Schedule != nil && util.Config.Schedule.Timezone != "" {

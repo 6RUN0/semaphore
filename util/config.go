@@ -541,6 +541,32 @@ type ConfigType struct {
 	//       ANSIBLE_HOME is set per template to isolate .ansible/ for Ansible tasks.
 	HomeDirMode string `json:"home_dir_mode,omitempty" rule:"^(user_home|project_home|template_dir)?$" env:"SEMAPHORE_HOME_DIR_MODE" default:"template_dir"`
 
+	// TargetHostVar names an extra variable that carries the hosts picked in the
+	// task form, in addition to the canonical semaphore_vars.limit. It exists so
+	// that a playbook which already chooses its hosts through a variable of its
+	// own — hosts: "{{ target | default('all') }}" and the like — works with the
+	// host picker without being rewritten.
+	//
+	// Read on the server only. The value is resolved once per task and travels
+	// to whatever executes it (see db.Task.TargetHostVar), so a remote runner
+	// needs no configuration of its own and cannot disagree with the server.
+	//
+	// The variable is left undefined when nothing is picked, rather than set to
+	// an empty string: Jinja's default() filter replaces an undefined value, not
+	// an empty one, so defining it empty would silently turn such a play into one
+	// that matches no host at all. A playbook must therefore read it through
+	// default(), or it fails on exactly the runs where nothing was picked.
+	//
+	// It carries the template's own limit when the template does not allow
+	// overriding it, whatever the task form shows — the form still permits
+	// picking hosts there and gives no sign that they were ignored.
+	//
+	// The name is reserved for the duration of the run: a project environment
+	// variable of the same name is dropped, with a note in the task log. An
+	// environment *secret* of that name still wins, because secrets are passed
+	// as separate --extra-vars arguments after this one.
+	TargetHostVar string `json:"target_host_var,omitempty" rule:"^([a-zA-Z_][a-zA-Z0-9_]*)?$" env:"SEMAPHORE_TARGET_HOST_VAR"`
+
 	// SshConfigPath is a path to the custom SSH config file.
 	// Default path is ~/.ssh/config.
 	SshConfigPath string `json:"ssh_config_path,omitempty" env:"SEMAPHORE_SSH_PATH"`
@@ -1691,12 +1717,98 @@ func validateAccessKeyEncryption(key string) error {
 	}
 }
 
+// reservedTargetHostVarNames are names Ansible already owns. Naming one of them
+// as the target host variable makes the result undefined: depending on the name,
+// Ansible either warns and ignores the value or lets the extra variable win for
+// the whole run, and either way the playbook stops seeing what it expects.
+//
+// The magic variables are the non-ansible_ ones documented in Ansible's
+// "Special Variables" appendix (checked against docs/docsite/rst/
+// reference_appendices/special_variables.rst on the devel branch, 2026-08-29);
+// the ansible_ prefixed ones are covered by the prefix rule in
+// validateTargetHostVar instead. The Jinja globals come from the same source
+// Ansible builds its own reserved set from — lib/ansible/vars/reserved.py seeds
+// it with the template environment's globals — and a variable shadowing one of
+// them breaks every lookup() in the run.
+//
+// The list is a guard against the worst names, not a proof of safety: Ansible
+// also reserves every Play, Role, Block and Task keyword, and those change
+// between releases.
+var reservedTargetHostVarNames = map[string]bool{
+	// Magic variables.
+	"group_names":              true,
+	"groups":                   true,
+	"hostvars":                 true,
+	"inventory_dir":            true,
+	"inventory_file":           true,
+	"inventory_hostname":       true,
+	"inventory_hostname_short": true,
+	"omit":                     true,
+	"play_hosts":               true,
+	"playbook_dir":             true,
+	"role_name":                true,
+	"role_names":               true,
+	"role_path":                true,
+
+	// Play and Task keywords a variable would shadow.
+	"environment": true,
+	"hosts":       true,
+	"vars":        true,
+
+	// Jinja globals.
+	"lookup": true,
+	"q":      true,
+	"query":  true,
+}
+
+// validateTargetHostVar refuses a target host variable that would overwrite
+// something Ansible relies on. The shape of the name is checked by the field's
+// rule tag; this covers what a regular expression cannot, since RE2 has no
+// negative lookahead to express "anything but the ansible_ prefix".
+func validateTargetHostVar(name string) error {
+	if name == "" {
+		return nil
+	}
+
+	// The ansible_ prefix holds connection settings and facts. Replacing
+	// ansible_user or ansible_host with a list of hosts breaks the connection
+	// itself, and the failure would point at SSH rather than at this setting.
+	if strings.HasPrefix(name, "ansible_") {
+		return fmt.Errorf(
+			"target_host_var must not start with 'ansible_' (got %q): those names carry Ansible's own connection settings and facts",
+			name,
+		)
+	}
+
+	// Reserved for Semaphore's own namespaces, semaphore_vars among them, so
+	// that adding one later cannot collide with a deployment already using the
+	// name.
+	if strings.HasPrefix(name, "semaphore_") {
+		return fmt.Errorf(
+			"target_host_var must not start with 'semaphore_' (got %q): that prefix is reserved for the variables Semaphore provides itself",
+			name,
+		)
+	}
+
+	if reservedTargetHostVarNames[name] {
+		return fmt.Errorf(
+			"target_host_var must not be %q: Ansible reserves that name and the outcome is undefined — it may warn and ignore the value, or let it win for the whole run",
+			name,
+		)
+	}
+
+	return nil
+}
+
 func validateConfig() {
 	err := validate(Config)
 	if err != nil {
 		panic(err)
 	}
 
+	if err := validateTargetHostVar(Config.TargetHostVar); err != nil {
+		panic(err)
+	}
 	if err := validateAccessKeyEncryption(Config.AccessKeyEncryption); err != nil {
 		panic(err)
 	}

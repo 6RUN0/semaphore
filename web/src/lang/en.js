@@ -497,6 +497,8 @@ export default {
   gitClient: 'Git Client',
   tmpPath: 'Temp Path',
   homeDirMode: 'Home Dir Mode',
+  targetHostVar: 'Target Host Variable',
+  targetHostVarUnset: 'not set',
   scheduleTimezone: 'Schedule Timezone',
   ansibleNotFound: 'Ansible not found on this server',
   database: 'Database',

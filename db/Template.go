@@ -399,6 +399,16 @@ func (tpl *Template) Validate() error {
 		if tpl.InventoryID == nil {
 			return common_errors.NewValidationError("template inventory can not be empty")
 		}
+
+		// The template's limit ends up in the same rendered extra variable as
+		// the task's, so it needs the same check. A malformed params map is not
+		// this validator's business — it is reported where the params are read.
+		var params AnsibleTemplateParams
+		if tpl.FillParams(&params) == nil {
+			if err := ValidateAnsibleLimit(params.Limit, "template"); err != nil {
+				return err
+			}
+		}
 	}
 
 	if tpl.Name == "" {

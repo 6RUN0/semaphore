@@ -1,6 +1,8 @@
 package tasks
 
 import (
+	"encoding/json"
+	"strings"
 	"testing"
 
 	"github.com/semaphoreui/semaphore/db"
@@ -365,4 +367,266 @@ func TestPrepareRefusesResolveWithPasswordVault(t *testing.T) {
 
 	require.Error(t, err)
 	assert.ErrorContains(t, err, "password")
+}
+
+// recordingLogger captures the lines a task writes to its log. The embedded nil
+// interface panics on any method a test did not expect to be called, which keeps
+// the double honest without reimplementing the whole Logger surface.
+type recordingLogger struct {
+	task_logger.Logger
+	lines []string
+}
+
+func (l *recordingLogger) Log(msg string) {
+	l.lines = append(l.lines, msg)
+}
+
+func TestEffectiveAnsibleLimit(t *testing.T) {
+	tests := []struct {
+		name      string
+		tplParams db.AnsibleTemplateParams
+		params    db.AnsibleTaskParams
+		expected  string
+	}{
+		{
+			name:      "nothing set anywhere",
+			tplParams: db.AnsibleTemplateParams{},
+			params:    db.AnsibleTaskParams{},
+			expected:  "",
+		},
+		{
+			name:      "template value with no override allowed",
+			tplParams: db.AnsibleTemplateParams{Limit: []string{"webservers"}},
+			params:    db.AnsibleTaskParams{Limit: []string{"db01"}},
+			expected:  "webservers",
+		},
+		{
+			name: "task overrides the template when allowed",
+			tplParams: db.AnsibleTemplateParams{
+				AllowOverrideLimit: true,
+				Limit:              []string{"webservers"},
+			},
+			params:   db.AnsibleTaskParams{Limit: []string{"web01", "web02"}},
+			expected: "web01,web02",
+		},
+		{
+			name:      "override allowed but the task picked nothing",
+			tplParams: db.AnsibleTemplateParams{AllowOverrideLimit: true, Limit: []string{"webservers"}},
+			params:    db.AnsibleTaskParams{},
+			expected:  "webservers",
+		},
+		{
+			// Distinct from the case above: an empty selection is not nil, so it
+			// takes the override branch and clears the template's limit. Clearing
+			// every host in the form therefore means the whole inventory, not
+			// nothing — both through --limit and through default() in a playbook
+			// that selects hosts by variable.
+			name:      "override allowed and the task cleared the selection",
+			tplParams: db.AnsibleTemplateParams{AllowOverrideLimit: true, Limit: []string{"webservers"}},
+			params:    db.AnsibleTaskParams{Limit: []string{}},
+			expected:  "",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			assert.Equal(t, tt.expected, effectiveAnsibleLimit(tt.tplParams, tt.params))
+		})
+	}
+}
+
+func TestGetEnvironmentExtraVarsJSONCarriesTheLimit(t *testing.T) {
+	// Not for the feature — getTaskDetails builds the task URL out of the global
+	// config — but a fresh one, so that a TargetHostVar left there by another
+	// test cannot decide the outcome of these.
+	prevCfg := util.Config
+	t.Cleanup(func() { util.Config = prevCfg })
+	util.Config = &util.ConfigType{}
+
+	decode := func(t *testing.T, raw string) map[string]any {
+		t.Helper()
+		var decoded map[string]any
+		require.NoError(t, json.Unmarshal([]byte(raw), &decoded))
+		return decoded
+	}
+
+	t.Run("canonical variable always carries the limit", func(t *testing.T) {
+		exec := &LocalExecutor{}
+
+		raw, err := exec.getEnvironmentExtraVarsJSON("admin", nil, "web01,web02")
+		require.NoError(t, err)
+
+		decoded := decode(t, raw)
+		semaphoreVars, ok := decoded["semaphore_vars"].(map[string]any)
+		require.True(t, ok, "semaphore_vars must be an object")
+		assert.Equal(t, "web01,web02", semaphoreVars["limit"])
+	})
+
+	// The name is read off the task, where the server stamped it, and not off
+	// util.Config: this code also runs inside a remote runner, whose own
+	// configuration file knows nothing about the setting.
+	t.Run("alias named by the task carries the same value", func(t *testing.T) {
+		exec := &LocalExecutor{Task: db.Task{TargetHostVar: "involved_hosts"}}
+
+		raw, err := exec.getEnvironmentExtraVarsJSON("admin", nil, "web01,web02")
+		require.NoError(t, err)
+
+		decoded := decode(t, raw)
+		assert.Equal(t, "web01,web02", decoded["involved_hosts"])
+
+		semaphoreVars, ok := decoded["semaphore_vars"].(map[string]any)
+		require.True(t, ok)
+		assert.Equal(t, "web01,web02", semaphoreVars["limit"],
+			"the alias must not replace the canonical variable")
+	})
+
+	t.Run("the configured name is ignored when the task does not carry it", func(t *testing.T) {
+		prevCfg := util.Config
+		t.Cleanup(func() { util.Config = prevCfg })
+		util.Config = &util.ConfigType{TargetHostVar: "involved_hosts"}
+
+		exec := &LocalExecutor{}
+
+		raw, err := exec.getEnvironmentExtraVarsJSON("admin", nil, "web01,web02")
+		require.NoError(t, err)
+
+		assert.NotContains(t, decode(t, raw), "involved_hosts",
+			"the executor must not fall back to its own process configuration")
+	})
+
+	// The whole point of leaving the variable undefined: Jinja's default()
+	// replaces an undefined value and not an empty one, so an empty string here
+	// would turn hosts: "{{ picked | default('all') }}" into a play matching no
+	// host at all.
+	t.Run("an empty limit defines neither variable", func(t *testing.T) {
+		exec := &LocalExecutor{Task: db.Task{TargetHostVar: "involved_hosts"}}
+
+		raw, err := exec.getEnvironmentExtraVarsJSON("admin", nil, "")
+		require.NoError(t, err)
+
+		decoded := decode(t, raw)
+		assert.NotContains(t, decoded, "involved_hosts")
+
+		semaphoreVars, ok := decoded["semaphore_vars"].(map[string]any)
+		require.True(t, ok)
+		assert.NotContains(t, semaphoreVars, "limit")
+	})
+
+	// Without the unconditional reservation the caller could set the variable
+	// itself through task.environment and pick the hosts a playbook targets —
+	// precisely when the template forbids overriding the limit, since a forbidden
+	// override with no template limit is what produces an empty one here.
+	t.Run("an empty limit still clears a value supplied under the alias", func(t *testing.T) {
+		logger := &recordingLogger{}
+		exec := &LocalExecutor{
+			Task:        db.Task{TargetHostVar: "involved_hosts"},
+			Environment: db.Environment{JSON: `{"involved_hosts":"prod-db01","unrelated":"kept"}`},
+			Logger:      logger,
+		}
+
+		raw, err := exec.getEnvironmentExtraVarsJSON("admin", nil, "")
+		require.NoError(t, err)
+
+		decoded := decode(t, raw)
+		assert.NotContains(t, decoded, "involved_hosts")
+		assert.Equal(t, "kept", decoded["unrelated"], "other variables must survive")
+		assert.Contains(t, strings.Join(logger.lines, "\n"), "involved_hosts",
+			"the dropped variable must be reported in the task log")
+	})
+
+	t.Run("a picked limit overrides a value supplied under the alias", func(t *testing.T) {
+		logger := &recordingLogger{}
+		exec := &LocalExecutor{
+			Task:        db.Task{TargetHostVar: "involved_hosts"},
+			Environment: db.Environment{JSON: `{"involved_hosts":"prod-db01"}`},
+			Logger:      logger,
+		}
+
+		raw, err := exec.getEnvironmentExtraVarsJSON("admin", nil, "web01")
+		require.NoError(t, err)
+
+		assert.Equal(t, "web01", decode(t, raw)["involved_hosts"])
+		assert.NotEmpty(t, logger.lines, "the overridden variable must be reported")
+	})
+}
+
+// The refactoring that introduced effectiveAnsibleLimit exists to keep --limit
+// and the published variable derived from one value. This pins that they agree
+// all the way through the real argument builder, which is where they would drift
+// apart again.
+func TestGetPlaybookArgsPublishesTheLimitItRestrictsTo(t *testing.T) {
+	setupExecutorConfig(t)
+	util.Config.TmpPath = t.TempDir()
+
+	exec := &LocalExecutor{
+		Task: db.Task{
+			TargetHostVar: "involved_hosts",
+			Params:        db.MapStringAnyField{"limit": []any{"web01", "web02"}},
+		},
+		Template: db.Template{
+			Playbook:   "test.yml",
+			TaskParams: db.MapStringAnyField{"allow_override_limit": true},
+		},
+		Inventory: db.Inventory{Type: db.InventoryStatic},
+		Logger:    &recordingLogger{},
+	}
+
+	args, _, err := exec.getPlaybookArgs("admin", nil)
+	require.NoError(t, err)
+
+	assert.Contains(t, args, "--limit=web01,web02")
+
+	extraVars := extraVarsArg(t, args)
+	assert.Equal(t, "web01,web02", extraVars["involved_hosts"])
+
+	semaphoreVars, ok := extraVars["semaphore_vars"].(map[string]any)
+	require.True(t, ok)
+	assert.Equal(t, "web01,web02", semaphoreVars["limit"])
+}
+
+// A template that forbids the override must publish its own limit, not the one
+// the caller asked for — otherwise the variable would hand the caller the host
+// selection that --limit denies them.
+func TestGetPlaybookArgsIgnoresForbiddenLimitOverride(t *testing.T) {
+	setupExecutorConfig(t)
+	util.Config.TmpPath = t.TempDir()
+
+	exec := &LocalExecutor{
+		Task: db.Task{
+			TargetHostVar: "involved_hosts",
+			Params:        db.MapStringAnyField{"limit": []any{"prod-db01"}},
+		},
+		Template: db.Template{
+			Playbook:   "test.yml",
+			TaskParams: db.MapStringAnyField{"limit": []any{"webservers"}},
+		},
+		Inventory: db.Inventory{Type: db.InventoryStatic},
+		Logger:    &recordingLogger{},
+	}
+
+	args, _, err := exec.getPlaybookArgs("admin", nil)
+	require.NoError(t, err)
+
+	assert.Contains(t, args, "--limit=webservers")
+	assert.Equal(t, "webservers", extraVarsArg(t, args)["involved_hosts"])
+}
+
+// extraVarsArg decodes the JSON that follows the --extra-vars flag.
+func extraVarsArg(t *testing.T, args []string) map[string]any {
+	t.Helper()
+
+	for i, arg := range args {
+		if arg != "--extra-vars" {
+			continue
+		}
+
+		require.Greater(t, len(args), i+1, "--extra-vars must be followed by a value")
+
+		var decoded map[string]any
+		require.NoError(t, json.Unmarshal([]byte(args[i+1]), &decoded))
+		return decoded
+	}
+
+	require.Fail(t, "--extra-vars is missing from the arguments")
+	return nil
 }

@@ -5,6 +5,7 @@ import (
 	"os"
 	"path/filepath"
 	"reflect"
+	"regexp"
 	"strconv"
 	"strings"
 	"testing"
@@ -602,4 +603,113 @@ func TestValidateConfig(t *testing.T) {
 	Config.AccessKeyEncryption = "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
 	ensureConfigValidationFailure(t, "AccessKeyEncryption", Config.AccessKeyEncryption)
 	Config.AccessKeyEncryption = testCookieHash
+
+	// TargetHostVar: the shape passes the rule tag, so only validateConfig's own
+	// call to validateTargetHostVar can reject it. Pinned here because dropping
+	// that call would leave the unit test below passing.
+	Config.TargetHostVar = "ansible_user"
+	ensureConfigValidationFailure(t, "TargetHostVar", Config.TargetHostVar)
+
+	Config.TargetHostVar = "groups"
+	ensureConfigValidationFailure(t, "TargetHostVar", Config.TargetHostVar)
+
+	Config.TargetHostVar = "involved_hosts"
+	validateConfig()
+	Config.TargetHostVar = ""
+}
+
+func TestValidateTargetHostVar(t *testing.T) {
+	tests := []struct {
+		name      string
+		value     string
+		expectErr string
+	}{
+		{name: "unset is allowed", value: ""},
+		{name: "plain name", value: "involved_hosts"},
+		{name: "leading underscore", value: "_target"},
+		{name: "digits after the first character", value: "target2"},
+		{
+			name:      "ansible connection setting",
+			value:     "ansible_user",
+			expectErr: "must not start with 'ansible_'",
+		},
+		{
+			name:      "ansible prefix alone",
+			value:     "ansible_",
+			expectErr: "must not start with 'ansible_'",
+		},
+		{
+			name:      "semaphore namespace",
+			value:     "semaphore_vars",
+			expectErr: "must not start with 'semaphore_'",
+		},
+		{
+			name:      "semaphore prefix alone",
+			value:     "semaphore_",
+			expectErr: "must not start with 'semaphore_'",
+		},
+	}
+
+	// Every reserved name must be rejected, not just the two the table above
+	// spells out: the list is the whole point of the check, and a name silently
+	// dropped from it fails only in production, inside a playbook.
+	for name := range reservedTargetHostVarNames {
+		tests = append(tests, struct {
+			name      string
+			value     string
+			expectErr string
+		}{
+			name:      "reserved name " + name,
+			value:     name,
+			expectErr: "Ansible reserves that name",
+		})
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			err := validateTargetHostVar(tt.value)
+
+			if tt.expectErr == "" {
+				assert.NoError(t, err)
+				return
+			}
+
+			require.Error(t, err)
+			assert.ErrorContains(t, err, tt.expectErr)
+		})
+	}
+}
+
+// The rule tag rejects what is not a usable variable name at all; it has to keep
+// accepting an empty value, which is how the feature stays off by default. The
+// tag is checked directly rather than through validate() so that an unrelated
+// field with its own rule cannot decide the outcome.
+func TestTargetHostVarRuleAcceptsEmptyAndRejectsMalformed(t *testing.T) {
+	field, ok := reflect.TypeOf(ConfigType{}).FieldByName("TargetHostVar")
+	require.True(t, ok, "ConfigType must carry a TargetHostVar field")
+
+	rule := field.Tag.Get("rule")
+	require.NotEmpty(t, rule, "TargetHostVar must constrain the shape of the name")
+
+	tests := []struct {
+		name  string
+		value string
+		valid bool
+	}{
+		{name: "empty", value: "", valid: true},
+		{name: "well formed", value: "involved_hosts", valid: true},
+		{name: "leading underscore", value: "_target", valid: true},
+		{name: "leading digit", value: "1host", valid: false},
+		{name: "space inside", value: "involved hosts", valid: false},
+		{name: "dash inside", value: "involved-hosts", valid: false},
+		{name: "dot inside", value: "involved.hosts", valid: false},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			match, err := regexp.MatchString(rule, tt.value)
+			require.NoError(t, err)
+			assert.Equal(t, tt.valid, match)
+		})
+	}
 }

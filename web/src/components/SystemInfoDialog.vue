@@ -52,6 +52,17 @@
                   <td>{{ info.system.home_dir_mode }}</td>
                 </tr>
                 <tr>
+                  <td class="font-weight-medium">{{ $t('targetHostVar') }}</td>
+                  <td>
+                    <span v-if="info.system.target_host_var">
+                      {{ info.system.target_host_var }}
+                    </span>
+                    <span v-else class="text--secondary">
+                      {{ $t('targetHostVarUnset') }}
+                    </span>
+                  </td>
+                </tr>
+                <tr>
                   <td class="font-weight-medium">{{ $t('scheduleTimezone') }}</td>
                   <td>{{ info.system.schedule_timezone }}</td>
                 </tr>

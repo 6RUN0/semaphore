@@ -482,6 +482,13 @@ func (t *TaskRunner) populateDetails() error {
 	// get template
 	var err error
 
+	// Resolve the target host variable here, on the server, rather than in the
+	// executor. The executor may be a remote runner process reading a different
+	// configuration file, which would make the setting depend on whichever node
+	// picked the task up. Assigned unconditionally: db.Task is bound from the
+	// request body, so a value the caller supplied must not survive.
+	t.Task.TargetHostVar = util.Config.TargetHostVar
+
 	t.Template, err = t.pool.store.GetTemplate(t.Task.ProjectID, t.Task.TemplateID)
 	if err != nil {
 		return t.prepareError(err, "Template not found!")

@@ -47,6 +47,22 @@ properties:
     enum: ["", user_home, project_home, template_dir]
     default: template_dir
     description: How HOME is set for task runs.
+  target_host_var:
+    type: string
+    pattern: "^([a-zA-Z_][a-zA-Z0-9_]*)?$"
+    not:
+      pattern: "^(ansible|semaphore)_"
+    description: >-
+      Name of an extra variable carrying the hosts picked in the task form, in
+      addition to semaphore_vars.limit. Lets a playbook that selects hosts
+      through its own variable work with the host picker unchanged. Left
+      undefined when nothing is picked, so always read it through default() in
+      the playbook. Carries the template's own limit when the template does not
+      allow overriding it, whatever the form shows. Reserved for the run: a
+      project environment variable of this name is dropped, in every project.
+      Set on the server only: the value travels with each task, so runners need
+      no configuration of their own. Must not start with ansible_ or
+      semaphore_, and must not name a variable Ansible reserves.
   ssh_config_path:
     type: string
     description: Path to custom SSH config (default ~/.ssh/config).
