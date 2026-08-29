@@ -47,6 +47,15 @@
         dense
       ></v-text-field>
 
+      <v-checkbox
+        class="pt-0 mb-2"
+        style="margin-top: -5px"
+        v-model="item.params.tls_skip_verify"
+        label="Skip TLS certificate verification (insecure)"
+        :disabled="formSaving"
+        data-testid="secretStorage-vaultTlsSkipVerify"
+      />
+
       <SecretSourceToggle v-model="secretStorage" label="Token" :disabled="formSaving" />
 
       <v-text-field
