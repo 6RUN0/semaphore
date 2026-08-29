@@ -73,10 +73,14 @@ func (c CmdGitClient) run(r GitRepository, targetDir GitRepositoryDirType, args 
 
 	cmd := c.makeCmd(r, targetDir, keyInstallation, args...)
 
+	boundOutputDrain(cmd)
 	finishLog := r.Logger.LogCmd(cmd)
 	defer finishLog()
 
-	return cmd.Run()
+	err = cmd.Run()
+	finishLog() // Flush the command output before the drain notice, if any.
+
+	return acceptDrainTimeout(r.Logger, err)
 }
 
 // lsRemoteTimeout bounds a `git ls-remote`.

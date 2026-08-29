@@ -49,9 +49,14 @@ func (p AnsiblePlaybook) makeCmd(command string, args []string, environmentVars 
 
 func (p AnsiblePlaybook) runCmd(command string, args []string, environmentVars []string) error {
 	cmd := p.makeCmd(command, args, environmentVars)
+	boundOutputDrain(cmd)
 	finishLog := p.Logger.LogCmd(cmd)
 	defer finishLog()
-	return cmd.Run()
+
+	err := cmd.Run()
+	finishLog() // Flush the command output before the drain notice, if any.
+
+	return acceptDrainTimeout(p.Logger, err)
 }
 
 func (p AnsiblePlaybook) RunPlaybook(args []string, environmentVars []string, inputs map[string]string, cb func(*os.Process)) error {

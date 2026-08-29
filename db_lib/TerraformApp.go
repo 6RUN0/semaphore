@@ -112,9 +112,14 @@ func (t *TerraformApp) makeCmd(command string, args []string, environmentVars []
 
 func (t *TerraformApp) runCmd(command string, args []string) error {
 	cmd := t.makeCmd(command, args, nil)
+	boundOutputDrain(cmd)
 	finishLog := t.Logger.LogCmd(cmd)
 	defer finishLog()
-	return cmd.Run()
+
+	err := cmd.Run()
+	finishLog() // Flush the command output before the drain notice, if any.
+
+	return acceptDrainTimeout(t.Logger, err)
 }
 
 func (t *TerraformApp) GetFullPath() string {
@@ -158,6 +163,7 @@ func (t *TerraformApp) init(environmentVars []string, keyInstaller AccessKeyInst
 
 	cmd := t.makeCmd(t.Name, args, environmentVars)
 	cmd.Env = append(cmd.Env, keyInstallation.GetGitEnv()...)
+	boundOutputDrain(cmd)
 	finishLog := t.Logger.LogCmd(cmd)
 	defer finishLog()
 
@@ -178,7 +184,9 @@ func (t *TerraformApp) init(environmentVars []string, keyInstaller AccessKeyInst
 	}
 
 	err = cmd.Wait()
-	if err != nil {
+	finishLog() // Flush the command output before the drain notice, if any.
+
+	if err = acceptDrainTimeout(t.Logger, err); err != nil {
 		return err
 	}
 
@@ -217,6 +225,7 @@ func (t *TerraformApp) selectWorkspace(workspace string, environmentVars []strin
 		args = append(tgArgs, args...)
 	}
 	cmd := t.makeCmd(t.Name, args, environmentVars)
+	boundOutputDrain(cmd)
 	finishLog := t.Logger.LogCmd(cmd)
 	defer finishLog()
 
@@ -226,7 +235,9 @@ func (t *TerraformApp) selectWorkspace(workspace string, environmentVars []strin
 	}
 
 	err = cmd.Wait()
-	if err != nil {
+	finishLog() // Flush the command output before the drain notice, if any.
+
+	if err = acceptDrainTimeout(t.Logger, err); err != nil {
 		return err
 	}
 
@@ -301,6 +312,7 @@ func (t *TerraformApp) Plan(args []string, environmentVars []string, inputs map[
 	planArgs := []string{"plan", "-lock=false"}
 	planArgs = append(planArgs, args...)
 	cmd := t.makeCmd(t.Name, planArgs, environmentVars)
+	boundOutputDrain(cmd)
 	finishLog := t.Logger.LogCmd(cmd)
 	defer finishLog()
 
@@ -319,7 +331,9 @@ func (t *TerraformApp) Plan(args []string, environmentVars []string, inputs map[
 	cb(cmd.Process)
 
 	err = cmd.Wait()
-	if err != nil {
+	finishLog() // Flush the command output before the drain notice, if any.
+
+	if err = acceptDrainTimeout(t.Logger, err); err != nil {
 		return err
 	}
 
@@ -330,6 +344,7 @@ func (t *TerraformApp) Apply(args []string, environmentVars []string, inputs map
 	applyArgs := []string{"apply", "-auto-approve", "-lock=false"}
 	applyArgs = append(applyArgs, args...)
 	cmd := t.makeCmd(t.Name, applyArgs, environmentVars)
+	boundOutputDrain(cmd)
 	finishLog := t.Logger.LogCmd(cmd)
 	defer finishLog()
 	cmd.Stdin = strings.NewReader("")
@@ -340,7 +355,9 @@ func (t *TerraformApp) Apply(args []string, environmentVars []string, inputs map
 	cb(cmd.Process)
 
 	err = cmd.Wait()
-	if err != nil {
+	finishLog() // Flush the command output before the drain notice, if any.
+
+	if err = acceptDrainTimeout(t.Logger, err); err != nil {
 		return err
 	}
 
