@@ -5,41 +5,21 @@ name: Dev
     branches:
       - develop
       - 2-*-stable
+      # The fork's working branch. Upstream has no branch by this name, so the
+      # entry only ever fires on a fork and costs the upstream repository
+      # nothing.
+      - current
   pull_request:
     branches:
       - develop
+  # Any branch, on demand. A fork carries work on branches this file cannot
+  # know the names of, and re-running a build after fixing the environment
+  # rather than the code is worth not needing an empty commit for.
+  workflow_dispatch:
 
 jobs:
   build-local:
     runs-on: ubuntu-latest
-
-    # The snapshot store carries hand-written SQL that the SQLite tests cannot
-    # vouch for on MySQL and PostgreSQL; the dialect tests need real servers.
-    services:
-      mysql:
-        image: mysql:8
-        env:
-          MYSQL_ROOT_PASSWORD: test
-          MYSQL_DATABASE: semaphore_test
-        ports:
-          - 13306:3306
-        options: >-
-          --health-cmd "mysqladmin ping -h localhost -ptest"
-          --health-interval 5s
-          --health-timeout 5s
-          --health-retries 10
-      postgres:
-        image: postgres:16
-        env:
-          POSTGRES_PASSWORD: test
-          POSTGRES_DB: semaphore_test
-        ports:
-          - 15432:5432
-        options: >-
-          --health-cmd "pg_isready -U postgres"
-          --health-interval 5s
-          --health-timeout 5s
-          --health-retries 10
 
     steps:
       - name: Checkout source
@@ -65,8 +45,13 @@ jobs:
         run: |
           task deps
 
+      # The module is private and the token that reaches it is an upstream
+      # secret, so a fork has neither. Without the owner guard the clone runs
+      # with an empty token, fails, and takes every job downstream of this one
+      # with it. A fork builds against the open-source stub instead, which the
+      # dredd hooks detect at runtime and skip the workflow tests for.
       - name: Add PRO implementation
-        if: github.event_name == 'push'
+        if: github.event_name == 'push' && github.repository_owner == 'semaphoreui'
         run: |
           git clone -b main https://${{ secrets.GH_TOKEN }}@github.com/semaphoreui/semaphorepro-module.git pro_impl
           go work init . ./pro_impl
@@ -93,14 +78,11 @@ jobs:
       - name: Run tests
         run: task test
         env:
-          # Without the REQUIRED flags a missing binary or database skips the
+          # Without the REQUIRED flag a missing ansible-inventory skips the
           # tests behind it, and a skipped test still reports ok — an
           # environment that stopped running them would look exactly like one
           # where they pass.
           SEMAPHORE_TEST_ANSIBLE_REQUIRED: '1'
-          SEMAPHORE_TEST_MYSQL: 'root:test@127.0.0.1:13306/semaphore_test'
-          SEMAPHORE_TEST_POSTGRES: 'postgres:test@127.0.0.1:15432/semaphore_test?sslmode=disable'
-          SEMAPHORE_TEST_DIALECTS_REQUIRED: '1'
 
       - name: Upload artifacts
         uses: actions/upload-artifact@v7
@@ -228,7 +210,7 @@ jobs:
 
     services:
       postgres:
-        image: postgres:12.22
+        image: postgres:15
         env:
           POSTGRES_USER: semaphore
           POSTGRES_PASSWORD: p455w0rd
@@ -479,7 +461,7 @@ jobs:
 
     services:
       postgres:
-        image: postgres:12.22
+        image: postgres:15
         env:
           POSTGRES_USER: semaphore
           POSTGRES_PASSWORD: p455w0rd

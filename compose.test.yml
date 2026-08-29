@@ -1,24 +1,43 @@
 # Database engines for the dialect tests in db/sql/inventory_snapshot_dialect_test.go.
 #
-# Started by `task test:dialects`, which hands the DSNs below to the tests
-# through SEMAPHORE_TEST_MYSQL and SEMAPHORE_TEST_POSTGRES. Nothing else reads
-# this file; the application never runs against it.
+# Started by `task test:dialects` and by .github/workflows/dialects.yml, both of
+# which hand the DSNs below to the tests through SEMAPHORE_TEST_MYSQL and
+# SEMAPHORE_TEST_POSTGRES. This is the only place the engine list is written
+# down. Nothing else reads the file; the application never runs against it.
 #
 # The ports are deliberately not the default ones, so a MySQL or PostgreSQL
 # already listening on this machine keeps its own port.
+#
+# Two releases per family, the oldest and the newest still receiving upstream
+# security fixes. One version per family cannot catch a difference that appears
+# only between two of them, which is the entire class of defect these tests
+# exist for; and a release past its end of life cannot catch anything worth
+# acting on, because nobody upstream is fixing what it reports.
+#
+# End-of-life dates checked against endoflife.date on 2026-08-29. They are what
+# picks the versions here, so re-check them when bumping rather than reaching
+# for the newest tag.
 #
 # The containers are meant to stay up between runs: db.Migrate skips migrations
 # it has already applied, and every assertion is scoped to an inventory the run
 # creates, so a warm database is as good as a fresh one and saves the startup
 # wait. `task test:dialects:down` throws them away.
+#
+# Changing an image's major version is the exception. A server refuses to start
+# on a data directory another major wrote — "database files are incompatible
+# with server" — and the container exits before the tests reach it. Drop that
+# service's data when you edit its tag:
+#
+#	docker compose -f compose.test.yml rm -fsv <service>
 
 name: semaphore-test
 
 services:
   mysql:
-    # The engine the CI build-local job offers, so that a local pass and a CI
-    # pass mean the same thing.
-    image: mysql:8
+    # 8.4 LTS, supported to 2032-04-30. The floor: it is also what the CI
+    # migrate and dredd jobs run, so a failure here and a failure there mean
+    # the same thing.
+    image: mysql:8.4
     environment:
       MYSQL_ROOT_PASSWORD: test
       MYSQL_DATABASE: semaphore_test
@@ -30,9 +49,56 @@ services:
       timeout: 5s
       retries: 10
 
+  mysql-next:
+    # 9.7 LTS, supported to 2034-04-21.
+    image: mysql:9.7
+    environment:
+      MYSQL_ROOT_PASSWORD: test
+      MYSQL_DATABASE: semaphore_test
+    ports:
+      - "13307:3306"
+    healthcheck:
+      test: ["CMD", "mysqladmin", "ping", "-h", "localhost", "-ptest"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  mariadb:
+    # 10.11 LTS, supported to 2028-02-16. Semaphore drives MariaDB through the
+    # mysql dialect, so the snapshot schema gets utf8mb4_bin name columns here
+    # as well. That the schema can be created is all the migrate and dredd jobs
+    # prove; whether a case-sensitive primary key, a LIKE ESCAPE and a
+    # RowsAffected gate behave as they do on MySQL is what these tests settle.
+    image: mariadb:10.11
+    environment:
+      MARIADB_ROOT_PASSWORD: test
+      MARIADB_DATABASE: semaphore_test
+    ports:
+      - "13316:3306"
+    healthcheck:
+      test: ["CMD", "healthcheck.sh", "--connect", "--innodb_initialized"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  mariadb-next:
+    # 12.3 LTS, supported to 2029-06-12.
+    image: mariadb:12.3
+    environment:
+      MARIADB_ROOT_PASSWORD: test
+      MARIADB_DATABASE: semaphore_test
+    ports:
+      - "13317:3306"
+    healthcheck:
+      test: ["CMD", "healthcheck.sh", "--connect", "--innodb_initialized"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
   postgres:
-    # Also mirrors CI.
-    image: postgres:16
+    # 15, supported to 2027-11-11. PostgreSQL 14 is still alive but only until
+    # 2026-11-12, so pinning the floor to it would need redoing within weeks.
+    image: postgres:15
     environment:
       POSTGRES_PASSWORD: test
       POSTGRES_DB: semaphore_test
@@ -45,10 +111,9 @@ services:
       retries: 10
 
   postgres-next:
-    # The current major. The dialect tests exist for engine-specific behaviour
-    # (collation, LIKE ESCAPE, the width an indexed varchar may have), which is
-    # exactly the kind of thing a major bump changes, so the newest release is
-    # worth a run even though CI does not offer it yet.
+    # 18, supported to 2030-11-14. The dialect tests exist for engine-specific
+    # behaviour (collation, LIKE ESCAPE, the width an indexed varchar may have),
+    # which is exactly what a major bump changes.
     image: postgres:18
     environment:
       POSTGRES_PASSWORD: test

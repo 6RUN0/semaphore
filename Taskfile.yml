@@ -142,12 +142,20 @@ tasks:
       - go test -v -coverprofile=coverage.out ./...
 
   test:dialects:
-    desc: Run the dialect tests against real MySQL and PostgreSQL in containers
+    desc: Run the dialect tests against every database engine in compose.test.yml
     summary: |
       The snapshot store carries hand-written SQL, and SQLite accepts things a
       real engine rejects: collation, LIKE ESCAPE and the width an indexed
       varchar may have all differ. These tests run the same schema against the
       engines from compose.test.yml.
+
+      Every engine gets a run of its own, because the DSN environment variables
+      name a single server each. MariaDB is on the list because it shares the
+      mysql dialect but not MySQL's collations.
+
+      Two releases per family, the oldest and the newest still supported: an LTS
+      pair where the vendor has LTS at all, and for PostgreSQL — which has none,
+      every major simply gets five years — the oldest live major and the newest.
 
       The containers stay up afterwards, so a second run starts immediately.
       Reset them with `task test:dialects:down`.
@@ -157,21 +165,43 @@ tasks:
       # environment that stopped offering the databases would look exactly like
       # one where these tests pass.
       REQUIRED: SEMAPHORE_TEST_DIALECTS_REQUIRED=1
-      SUITE: go test ./db/sql/ -count=1 -v
+      # Each run names one server, so it also selects the one test that reads
+      # that variable: with both suites selected, REQUIRED would fire on the
+      # dialect whose DSN this run does not set.
+      MYSQL_SUITE: go test ./db/sql/ -count=1 -v -run TestInventorySnapshotOnDialectMySQL
+      POSTGRES_SUITE: go test ./db/sql/ -count=1 -v -run TestInventorySnapshotOnDialectPostgres
     cmds:
-      - "{{ .COMPOSE }} up -d --wait mysql postgres postgres-next"
+      - "{{ .COMPOSE }} up -d --wait mysql mysql-next mariadb mariadb-next postgres postgres-next"
+      # MySQL 8.4 LTS
       - >-
         {{ .REQUIRED }}
         SEMAPHORE_TEST_MYSQL='root:test@127.0.0.1:13306/semaphore_test'
-        {{ .SUITE }} -run TestInventorySnapshotOnDialectMySQL
+        {{ .MYSQL_SUITE }}
+      # MySQL 9.7 LTS
+      - >-
+        {{ .REQUIRED }}
+        SEMAPHORE_TEST_MYSQL='root:test@127.0.0.1:13307/semaphore_test'
+        {{ .MYSQL_SUITE }}
+      # MariaDB 10.11 LTS
+      - >-
+        {{ .REQUIRED }}
+        SEMAPHORE_TEST_MYSQL='root:test@127.0.0.1:13316/semaphore_test'
+        {{ .MYSQL_SUITE }}
+      # MariaDB 12.3 LTS
+      - >-
+        {{ .REQUIRED }}
+        SEMAPHORE_TEST_MYSQL='root:test@127.0.0.1:13317/semaphore_test'
+        {{ .MYSQL_SUITE }}
+      # PostgreSQL 15
       - >-
         {{ .REQUIRED }}
         SEMAPHORE_TEST_POSTGRES='postgres:test@127.0.0.1:15432/semaphore_test?sslmode=disable'
-        {{ .SUITE }} -run TestInventorySnapshotOnDialectPostgres
+        {{ .POSTGRES_SUITE }}
+      # PostgreSQL 18
       - >-
         {{ .REQUIRED }}
         SEMAPHORE_TEST_POSTGRES='postgres:test@127.0.0.1:15433/semaphore_test?sslmode=disable'
-        {{ .SUITE }} -run TestInventorySnapshotOnDialectPostgres
+        {{ .POSTGRES_SUITE }}
 
   test:dialects:down:
     desc: Remove the dialect test databases, including their data

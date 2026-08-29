@@ -22,7 +22,10 @@ import (
 //	SEMAPHORE_TEST_POSTGRES='postgres:test@127.0.0.1:15432/semaphore_test?sslmode=disable' \
 //	go test ./db/sql/ -run TestInventorySnapshotOnDialect -count=1
 //
-// The database must be empty: the test applies every migration to it.
+// `task test:dialects` does this across every engine in compose.test.yml, which
+// is the list CI runs too. A database that already carries the schema is fine:
+// db.Migrate skips what it has applied, and every assertion is scoped to an
+// inventory the run creates.
 
 const (
 	envTestMySQL    = "SEMAPHORE_TEST_MYSQL"

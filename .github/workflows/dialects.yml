@@ -1,0 +1,97 @@
+# The snapshot store carries hand-written SQL, and SQLite accepts things a real
+# engine rejects. This runs the same schema and the same queries against every
+# engine the project supports, one job per engine.
+#
+# It is a workflow of its own rather than a step in Dev because the engines are
+# independent: they run in parallel instead of one after another, a failure is
+# named by the job that failed, and a red MariaDB does not hide a green
+# PostgreSQL.
+#
+# The engine list and the ports live in compose.test.yml, which `task
+# test:dialects` reads too, so a developer's run and this one cannot drift
+# apart. Keeping a second copy of that list is what let the versions diverge
+# before: the dialect tests were running against releases the Dev migrate and
+# dredd jobs do not use, and MariaDB had no dialect coverage at all.
+
+name: Dialects
+
+'on':
+  push:
+    branches:
+      - develop
+      - 2-*-stable
+      - current
+  pull_request:
+    branches:
+      - develop
+  workflow_dispatch:
+
+jobs:
+  dialect:
+    name: ${{ matrix.engine }}
+    runs-on: ubuntu-latest
+
+    strategy:
+      # Knowing how MariaDB answers is worth as much when PostgreSQL has
+      # already failed: cancelling the rest would hide the comparison this
+      # matrix exists to make.
+      fail-fast: false
+      matrix:
+        include:
+          - engine: MySQL 8.4 LTS
+            service: mysql
+            mysql: 'root:test@127.0.0.1:13306/semaphore_test'
+            suite: TestInventorySnapshotOnDialectMySQL
+          - engine: MySQL 9.7 LTS
+            service: mysql-next
+            mysql: 'root:test@127.0.0.1:13307/semaphore_test'
+            suite: TestInventorySnapshotOnDialectMySQL
+          - engine: MariaDB 10.11 LTS
+            service: mariadb
+            mysql: 'root:test@127.0.0.1:13316/semaphore_test'
+            suite: TestInventorySnapshotOnDialectMySQL
+          - engine: MariaDB 12.3 LTS
+            service: mariadb-next
+            mysql: 'root:test@127.0.0.1:13317/semaphore_test'
+            suite: TestInventorySnapshotOnDialectMySQL
+          - engine: PostgreSQL 15
+            service: postgres
+            postgres: 'postgres:test@127.0.0.1:15432/semaphore_test?sslmode=disable'
+            suite: TestInventorySnapshotOnDialectPostgres
+          - engine: PostgreSQL 18
+            service: postgres-next
+            postgres: 'postgres:test@127.0.0.1:15433/semaphore_test?sslmode=disable'
+            suite: TestInventorySnapshotOnDialectPostgres
+
+    steps:
+      - name: Checkout source
+        uses: actions/checkout@v7
+
+      - name: Setup golang
+        uses: actions/setup-go@v7
+        with:
+          go-version: '1.26.5'
+
+      - name: Start the database
+        env:
+          SERVICE: ${{ matrix.service }}
+        run: docker compose -f compose.test.yml up -d --wait "$SERVICE"
+
+      - name: Run the dialect tests
+        env:
+          # Refusing to skip is the point: a skipped test still reports ok, so a
+          # job whose database never came up would look exactly like a pass.
+          SEMAPHORE_TEST_DIALECTS_REQUIRED: '1'
+          # One of these is empty for any given engine, and the selector below
+          # picks the test that reads the other. Both are listed because a
+          # matrix value cannot name the variable it is assigned to.
+          SEMAPHORE_TEST_MYSQL: ${{ matrix.mysql }}
+          SEMAPHORE_TEST_POSTGRES: ${{ matrix.postgres }}
+          SUITE: ${{ matrix.suite }}
+        run: go test ./db/sql/ -count=1 -v -run "$SUITE"
+
+      - name: Show the database log on failure
+        if: failure()
+        env:
+          SERVICE: ${{ matrix.service }}
+        run: docker compose -f compose.test.yml logs --no-color "$SERVICE"
