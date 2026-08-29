@@ -1,0 +1,126 @@
+# Dependabot version updates.
+#
+# Dependabot is a GitHub service rather than a CI job: nothing here runs in a
+# workflow. It reads this file on its own schedule and opens pull requests. On a
+# fork it is off until it is enabled under Settings -> Code security.
+version: 2
+
+updates:
+  # Only the root Go module is updated. pro/go.mod replaces the root module with
+  # a relative path and repeats its dependency set as indirect requirements, so
+  # a separate update there would race the root one and leave the two modules
+  # disagreeing. It is brought back in line with `go mod tidy` after a root
+  # update lands.
+  - package-ecosystem: gomod
+    directory: /
+    schedule:
+      interval: weekly
+      day: monday
+    # A module published minutes ago has had no time for its problems to
+    # surface, and a yanked release is worth waiting out.
+    cooldown:
+      default-days: 7
+    open-pull-requests-limit: 5
+    commit-message:
+      prefix: build
+      include: scope
+    groups:
+      # One pull request for everything that is not a major: the Go test suite
+      # is the same either way, and reviewing 20 of them is not.
+      go-minor-and-patch:
+        patterns:
+          - "*"
+        update-types:
+          - minor
+          - patch
+
+  # The web application and the two Playwright suites.
+  - package-ecosystem: npm
+    directories:
+      - /web
+      - /test/e2e
+      - /test/mcp/e2e
+    schedule:
+      interval: weekly
+      day: monday
+    cooldown:
+      default-days: 7
+    open-pull-requests-limit: 5
+    commit-message:
+      prefix: build
+      prefix-development: build
+      include: scope
+    groups:
+      npm-minor-and-patch:
+        patterns:
+          - "*"
+        update-types:
+          - minor
+          - patch
+    ignore:
+      # The front end is Vue 2 throughout. Vuetify 2 has no Vue 3 release, and
+      # the router, the i18n plugin, the chart and editor wrappers and the test
+      # utils each tie a major of their own to the Vue major. Moving to Vue 3 is
+      # a rewrite, not an update, so these majors would only ever produce pull
+      # requests that cannot be merged.
+      - dependency-name: "vue*"
+        update-types:
+          - version-update:semver-major
+      - dependency-name: "@vue/*"
+        update-types:
+          - version-update:semver-major
+      # Vuetify 2 stylesheets divide with a slash, which Dart Sass deprecated in
+      # 1.33 in favour of math.div. The tilde range holds the last minor that
+      # takes it without warning, so only patches may move.
+      - dependency-name: sass
+        update-types:
+          - version-update:semver-minor
+          - version-update:semver-major
+      # @vue/eslint-config-airbnb 6 accepts ESLint 7 and 8, so the 8 line stays
+      # open. ESLint 9 drops .eslintrc for flat config, which every plugin here
+      # would have to follow first.
+      - dependency-name: eslint
+        versions:
+          - ">=9"
+
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+      day: monday
+    open-pull-requests-limit: 3
+    commit-message:
+      prefix: ci
+    groups:
+      actions:
+        patterns:
+          - "*"
+
+  # Base images. Listed one by one because the powershell image sits a level
+  # deeper than the rest, and a glob that reaches it would also pick up any
+  # directory added later without anyone deciding to include it.
+  - package-ecosystem: docker
+    directories:
+      - /deployment/docker/server
+      - /deployment/docker/server/powershell
+      - /deployment/docker/runner
+      - /deployment/docker/job
+      - /deployment/docker/helper
+      - /deployment/docker/dredd
+    schedule:
+      interval: weekly
+      day: monday
+    open-pull-requests-limit: 3
+    commit-message:
+      prefix: build
+      include: scope
+    groups:
+      # The golang image has to keep step with the version in go.mod, so these
+      # belong in one pull request rather than several. A new major of a base
+      # image is a distribution upgrade and stays on its own.
+      base-images:
+        patterns:
+          - "*"
+        update-types:
+          - minor
+          - patch
