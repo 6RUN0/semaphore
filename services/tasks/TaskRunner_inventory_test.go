@@ -170,7 +170,7 @@ func TestSetResolvedInventorySurvivesRefusedReport(t *testing.T) {
 // A1: IsInventoryResolve is what decides whether a report is even considered,
 // independent of whatever claim the task's id happens to hold. Params are the
 // server's own record of what the task is, so this is the check that has the
-// final word regardless of what a runner sends (review finding A1).
+// final word regardless of what a runner sends.
 func TestSetResolvedInventoryIgnoresNonResolveTask(t *testing.T) {
 	pool, store := newInventoryTaskPool(t)
 	project, inventory, task := newResolveTask(t, store)
@@ -336,7 +336,7 @@ func TestSetResolvedInventoryRefusesADifferentInventoryThanTheTaskRequested(t *t
 
 // A resolve that dies must not leave the picker saying "resolving" until the
 // claim expires half an hour later: the task's terminal status settles the
-// pending snapshot with an error (review finding M2).
+// pending snapshot with an error.
 func TestFailedResolveSettlesThePendingSnapshot(t *testing.T) {
 	for _, status := range []task_logger.TaskStatus{
 		task_logger.TaskFailStatus,
@@ -384,7 +384,7 @@ func TestFailedResolveLeavesAnotherClaimAlone(t *testing.T) {
 }
 
 // A resolve is the host picker's errand: its success must not fan out into the
-// autorun children waiting for a real build (review finding C3).
+// autorun children waiting for a real build.
 func TestResolveTaskStartsNoAutorunTasks(t *testing.T) {
 	pool, store := newInventoryTaskPool(t)
 	project, _, task := newResolveTask(t, store)
@@ -414,4 +414,51 @@ func TestResolveTaskStartsNoAutorunTasks(t *testing.T) {
 	for _, row := range tasks {
 		assert.Nil(t, row.BuildTaskID, "no autorun child may have been queued by a resolve")
 	}
+}
+
+// A resolve that succeeds without reporting a host list — an older runner that
+// does not know the field, or a report the server refused — used to leave the
+// claim pending for its whole 30-minute life, with no error and no way to retry.
+func TestSuccessfulResolveWithoutAReportSettlesThePendingSnapshot(t *testing.T) {
+	pool, store := newInventoryTaskPool(t)
+	project, inventory, task := newResolveTask(t, store)
+
+	claimed, err := store.ClaimInventorySnapshotResolve(project.ID, inventory.ID)
+	require.NoError(t, err)
+	require.True(t, claimed)
+	require.NoError(t, store.AssignInventorySnapshotResolveTask(project.ID, inventory.ID, task.ID))
+
+	runner := &TaskRunner{pool: pool, Task: task}
+	runner.SetStatus(task_logger.TaskSuccessStatus)
+
+	snapshot, err := store.GetInventorySnapshot(project.ID, inventory.ID)
+	require.NoError(t, err)
+	assert.Equal(t, db.InventorySnapshotStatusError, snapshot.Status)
+	assert.Contains(t, snapshot.Error, "without reporting a host list")
+}
+
+// The settle above is scoped to a claim that is still pending, so a resolve
+// that did report its hosts keeps the snapshot StoreResolved wrote.
+func TestSuccessfulResolveWithAReportKeepsItsSnapshot(t *testing.T) {
+	pool, store := newInventoryTaskPool(t)
+	project, inventory, task := newResolveTask(t, store)
+
+	claimed, err := store.ClaimInventorySnapshotResolve(project.ID, inventory.ID)
+	require.NoError(t, err)
+	require.True(t, claimed)
+	require.NoError(t, store.AssignInventorySnapshotResolveTask(project.ID, inventory.ID, task.ID))
+
+	runner := &TaskRunner{pool: pool, Task: task, Inventory: inventory}
+	runner.SetResolvedInventory([]string{"web01"}, map[string][]string{"web": {"web01"}})
+	runner.SetStatus(task_logger.TaskSuccessStatus)
+
+	snapshot, err := store.GetInventorySnapshot(project.ID, inventory.ID)
+	require.NoError(t, err)
+	assert.Equal(t, db.InventorySnapshotStatusOK, snapshot.Status)
+	assert.Empty(t, snapshot.Error)
+
+	hosts, err := store.GetInventorySnapshotHosts(project.ID, inventory.ID, db.InventoryHostFilter{})
+	require.NoError(t, err)
+	require.Len(t, hosts, 1)
+	assert.Equal(t, "web01", hosts[0].Name)
 }

@@ -564,7 +564,7 @@ func TestPendingExpires(t *testing.T) {
 
 // The report is a runner's word, not the parser's: hosts and groups are each
 // capped, but their product and the names inside group membership are
-// independent JSON fields and need caps of their own (review finding H-1).
+// independent JSON fields and need caps of their own.
 func TestStoreResolvedRefusesHostileGroupContent(t *testing.T) {
 	tests := []struct {
 		name    string
@@ -610,8 +610,7 @@ func TestStoreResolvedRefusesHostileGroupContent(t *testing.T) {
 // A resolve that failed must not cost the inventory the host list the previous
 // one produced. The claim moves the row off "ok" and clears its fingerprint, so
 // a read that recognised a resolved snapshot by its status alone would rebuild,
-// find an executable, and store "unsupported" over the only answer there is
-// (review findings M-1 and LOW-2).
+// find an executable, and store "unsupported" over the only answer there is.
 func TestReadingDynamicInventoryKeepsHostsOfAFailedResolve(t *testing.T) {
 	h := dynamicInventoryHarness(t)
 	h.claim(3, 7, 99)
@@ -675,8 +674,7 @@ func TestReadingDynamicInventorySettlesAnExpiredClaimWithoutLosingHosts(t *testi
 
 // Every snapshot table is keyed by name, so a report repeating one is a primary
 // key violation the store cannot tell from two writers colliding: it would
-// sleep and retry three times before failing a report that is perfectly usable
-// (review finding m-5).
+// sleep and retry three times before failing a report that is perfectly usable.
 func TestStoreResolvedDedupesReportedNames(t *testing.T) {
 	h := dynamicInventoryHarness(t)
 	h.claim(3, 7, 99)

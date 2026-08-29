@@ -168,8 +168,11 @@ tasks:
       # Each run names one server, so it also selects the one test that reads
       # that variable: with both suites selected, REQUIRED would fire on the
       # dialect whose DSN this run does not set.
-      MYSQL_SUITE: go test ./db/sql/ -count=1 -v -run TestInventorySnapshotOnDialectMySQL
-      POSTGRES_SUITE: go test ./db/sql/ -count=1 -v -run TestInventorySnapshotOnDialectPostgres
+      # Anchored, and backed by TestMain in the package: `go test -run` exits 0
+      # when the pattern matches nothing, so a renamed suite would otherwise
+      # turn every run below into a silent pass.
+      MYSQL_SUITE: go test ./db/sql/ -count=1 -v -run '^TestInventorySnapshotOnDialectMySQL$'
+      POSTGRES_SUITE: go test ./db/sql/ -count=1 -v -run '^TestInventorySnapshotOnDialectPostgres$'
     cmds:
       - "{{ .COMPOSE }} up -d --wait mysql mysql-next mariadb mariadb-next postgres postgres-next"
       # MySQL 8.4 LTS

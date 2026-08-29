@@ -6,6 +6,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -47,7 +48,7 @@ func TestRunInventoryListingReturnsOutput(t *testing.T) {
 	environment := fakeAnsibleInventory(t, "#!/bin/sh\nprintf '{}'\n")
 	playbook, _ := newListingPlaybook(t)
 
-	out, err := playbook.RunInventoryListing([]string{"--list"}, environment)
+	out, err := playbook.RunInventoryListing([]string{"--list"}, environment, nil)
 
 	require.NoError(t, err)
 	assert.Equal(t, "{}", string(out))
@@ -61,7 +62,7 @@ func TestRunInventoryListingRefusesOversizedOutput(t *testing.T) {
 		"#!/bin/sh\nhead -c %d /dev/zero\n", maxInventoryListingBytes+1))
 	playbook, _ := newListingPlaybook(t)
 
-	out, err := playbook.RunInventoryListing([]string{"--list"}, environment)
+	out, err := playbook.RunInventoryListing([]string{"--list"}, environment, nil)
 
 	require.Error(t, err)
 	assert.ErrorContains(t, err, fmt.Sprintf("larger than %d bytes", maxInventoryListingBytes))
@@ -76,7 +77,7 @@ func TestRunInventoryListingTruncatesDiagnostics(t *testing.T) {
 		maxInventoryListingStderrBytes*4))
 	playbook, logger := newListingPlaybook(t)
 
-	out, err := playbook.RunInventoryListing([]string{"--list"}, environment)
+	out, err := playbook.RunInventoryListing([]string{"--list"}, environment, nil)
 
 	require.NoError(t, err)
 	assert.Equal(t, "{}", string(out))
@@ -93,7 +94,7 @@ func TestRunInventoryListingReportsCommandFailure(t *testing.T) {
 	environment := fakeAnsibleInventory(t, "#!/bin/sh\nprintf 'boom\\n' >&2\nexit 2\n")
 	playbook, logger := newListingPlaybook(t)
 
-	_, err := playbook.RunInventoryListing([]string{"--list"}, environment)
+	_, err := playbook.RunInventoryListing([]string{"--list"}, environment, nil)
 
 	require.Error(t, err)
 	assert.Contains(t, logger.log(), "boom", "diagnostics still reach the log")
@@ -137,4 +138,51 @@ func TestBoundedBufferKeepsTheFirstBytes(t *testing.T) {
 
 	assert.True(t, buffer.overflow)
 	assert.Equal(t, strings.Repeat("x", 8), buffer.buf.String())
+}
+
+// A listing used to be the one Ansible command a user could not stop: the
+// callback that hands the executor the process was passed to RunPlaybook only,
+// so LocalExecutor.Kill found a nil process and returned silently.
+func TestRunInventoryListingIsStoppableThroughTheCallback(t *testing.T) {
+	environment := fakeAnsibleInventory(t, "#!/bin/sh\nsleep 60\nprintf '{}'\n")
+	playbook, _ := newListingPlaybook(t)
+
+	var stopped *os.Process
+
+	_, err := playbook.RunInventoryListing([]string{"--list"}, environment, func(p *os.Process) {
+		stopped = p
+		require.NoError(t, p.Kill())
+	})
+
+	require.Error(t, err)
+	assert.NotNil(t, stopped, "the run must hand out its process before it blocks")
+}
+
+// os/exec drains an io.Writer stderr in a goroutine that Wait waits for, and
+// that wait ends only when every holder of the write end closes it — a
+// background helper started by the listing holds it for as long as it runs.
+// The run has to give up on the diagnostics instead of on returning.
+func TestRunInventoryListingDoesNotWaitForAnInheritedStderr(t *testing.T) {
+	// stdout is redirected away from the helper on purpose: this test pins the
+	// stderr wait, and a helper holding stdout too would block the read above
+	// it instead.
+	environment := fakeAnsibleInventory(t, "#!/bin/sh\nsleep 20 >/dev/null &\nprintf '{}'\n")
+	playbook, _ := newListingPlaybook(t)
+
+	done := make(chan struct{})
+
+	go func() {
+		defer close(done)
+
+		out, err := playbook.RunInventoryListing([]string{"--list"}, environment, nil)
+
+		assert.NoError(t, err)
+		assert.Equal(t, "{}", string(out))
+	}()
+
+	select {
+	case <-done:
+	case <-time.After(stderrDrainGrace + 10*time.Second):
+		t.Fatal("the listing did not return while a helper held its stderr open")
+	}
 }

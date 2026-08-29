@@ -105,6 +105,14 @@ func (e InventoryOutsideRepositoryError) Error() string {
 // read, and where the checkout sits is the server's business, not theirs. The
 // paths that do appear are the relative ones the caller itself supplied.
 func ParseInventorySource(rootDir string, relPath string) (InventoryHosts, error) {
+	// filepath.Join(root, "") is root, so an inventory with no path set would
+	// otherwise be walked as if the whole repository were a directory
+	// inventory: every YAML file in it would contribute its top-level keys as
+	// group names. Ansible does not accept an empty -i either.
+	if strings.TrimSpace(relPath) == "" {
+		return InventoryHosts{}, fmt.Errorf("the inventory has no path inside its repository")
+	}
+
 	root, err := filepath.EvalSymlinks(rootDir)
 	if err != nil {
 		return InventoryHosts{}, fmt.Errorf("the inventory checkout cannot be read")
@@ -257,6 +265,12 @@ func (w *inventorySourceWalker) readFile(path string, reported string, info os.F
 	// read its JSON. Running a program out of a repository is a runner's job,
 	// never the server's, so it is refused here rather than parsed as text —
 	// parsing a script as INI yields a plausible list of nonsense host names.
+	//
+	// The refusal fails the whole source, including the static files beside it
+	// in a directory inventory that mixes both. Ansible would merge the two;
+	// here the caller turns the refusal into "ask a runner" (see
+	// InventoryNeedsRunnerError), and a half list presented as a whole one
+	// would be worse than none until that runner has answered.
 	if info.Mode().Perm()&0o111 != 0 {
 		return InventoryExecutableError{Path: reported}
 	}
@@ -281,8 +295,8 @@ func (w *inventorySourceWalker) readFile(path string, reported string, info os.F
 		return InventoryExecutableError{Path: reported}
 	}
 
-	if looksLikeYAMLInventory(content) {
-		return feedYAMLInventory(w.builder, string(content))
+	if mapping, ok := yamlInventoryMapping(content); ok {
+		return feedYAMLMapping(w.builder, mapping)
 	}
 
 	return feedINIInventory(w.builder, string(content))
@@ -303,17 +317,20 @@ func ansibleIgnoresEntry(name string) bool {
 	return isAlwaysIgnoredEntry(name) || hasIgnoredInventoryExt(name)
 }
 
-// looksLikeYAMLInventory picks the format the way it can be picked without
+// yamlInventoryMapping picks the format the way it can be picked without
 // running Ansible's plugin chain: a YAML inventory is always a mapping at its
 // root, and an INI one never parses as one.
-func looksLikeYAMLInventory(content []byte) bool {
+//
+// The decoded mapping is returned rather than only the verdict, because the
+// caller would otherwise unmarshal the same bytes again — and a directory
+// inventory is up to maxInventorySourceFiles files, each read under the
+// checkout lock on a request path.
+func yamlInventoryMapping(content []byte) (map[string]any, bool) {
 	var root any
 
 	if err := yaml.Unmarshal(content, &root); err != nil {
-		return false
+		return nil, false
 	}
 
-	_, ok := normalizeMapping(root)
-
-	return ok
+	return normalizeMapping(root)
 }

@@ -37,13 +37,31 @@ const MaxRunnerReportBodySize = int64(
 		db.MaxInventorySnapshotMemberships*(db.MaxInventoryHostNameLength+3)) +
 	32*1024*1024
 
+// MaxRunnerRegistrationBodySize bounds the body of a runner registration.
+// Registration is the one route of the internal API that takes no token at all,
+// so it is the cheapest place from which to hold the server hostage with an
+// endless body — RegisterRunner decodes before it looks at the token. Its body
+// is a handful of short fields and needs none of the report allowance above.
+const MaxRunnerRegistrationBodySize = int64(64 * 1024)
+
 // BodyLimitMiddleware caps the request body of the runner API. A body over the
 // cap fails the handler's decode, which answers 400 -- the runner retries the
 // same report, so a truncated one must not be applied in part, and Bind never
 // applies a failed decode.
 func BodyLimitMiddleware(next http.Handler) http.Handler {
+	return limitBody(next, MaxRunnerReportBodySize)
+}
+
+// RegistrationBodyLimitMiddleware caps the body of the registration route. It
+// is applied to that route alone rather than to the whole internal API: nesting
+// it above the progress route would cap the reports at the smaller of the two.
+func RegistrationBodyLimitMiddleware(next http.Handler) http.Handler {
+	return limitBody(next, MaxRunnerRegistrationBodySize)
+}
+
+func limitBody(next http.Handler, limit int64) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		r.Body = http.MaxBytesReader(w, r.Body, MaxRunnerReportBodySize)
+		r.Body = http.MaxBytesReader(w, r.Body, limit)
 		next.ServeHTTP(w, r)
 	})
 }
@@ -433,12 +451,12 @@ func (c *RunnerController) UpdateRunner(w http.ResponseWriter, r *http.Request) 
 			tsk.LogWithTime(logRecord.Time, logRecord.Message)
 		}
 
-		tsk.SetStatus(job.Status)
-
-		if job.Commit != nil {
-			tsk.SetCommit(job.Commit.Hash, job.Commit.Message)
-		}
-
+		// Applied before the status: one report carries both, and a terminal
+		// status settles the pending claim as failed. Applying that first would
+		// leave StoreResolved with no pending row to replace, so a host list
+		// this very report delivered would be dropped — the run is reported as
+		// "resolve failed" while its listing actually succeeded.
+		//
 		// tsk.SetResolvedInventory is the real defense (it re-checks the same
 		// thing against db.Task.Params, which the runner cannot influence);
 		// this is a second, earlier gate so a runner attaching a host list to
@@ -457,6 +475,12 @@ func (c *RunnerController) UpdateRunner(w http.ResponseWriter, r *http.Request) 
 			}
 
 			tsk.SetResolvedInventory(job.ResolvedInventory.Hosts, groups)
+		}
+
+		tsk.SetStatus(job.Status)
+
+		if job.Commit != nil {
+			tsk.SetCommit(job.Commit.Hash, job.Commit.Message)
 		}
 
 		// When the runner reports a terminal status, finalize the task here:

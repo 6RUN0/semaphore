@@ -46,8 +46,19 @@ func newHTTPClient() *http.Client {
 	}
 	return &http.Client{
 		Transport: &http.Transport{TLSClientConfig: tlsConfig},
+
+		// Without a deadline a hung server holds the runner's single progress
+		// goroutine forever, and the runner then reports nothing at all — its
+		// jobs look alive to a server that never hears from it again. A
+		// progress PUT can now trigger a full snapshot replacement on the
+		// server (four tables, up to db.MaxInventorySnapshotHosts rows, with
+		// retries), so the deadline has to be generous rather than tight; a
+		// dropped report is retried with the next one either way.
+		Timeout: runnerRequestTimeout,
 	}
 }
+
+const runnerRequestTimeout = 5 * time.Minute
 
 type JobPool struct {
 	// mu guards runningJobs and queue. They are mutated from the Run loop

@@ -495,17 +495,25 @@ type TaskManager interface {
 	GetTask(projectID int, taskID int) (Task, error)
 	GetTaskByID(taskID int) (Task, error)
 
-	// GetUnfinishedTasks returns the tasks the database still considers active,
-	// across all projects, oldest first, at most limit of them. It exists for
-	// restart recovery: the pool's live state dies with the process, and these
-	// rows are all that is left of what was running.
+	// GetUnfinishedTasks returns the tasks in the given statuses, across all
+	// projects, oldest first, at most limit of them. It exists for restart
+	// recovery: the pool's live state dies with the process, and these rows are
+	// all that is left of what was running.
+	//
+	// The statuses are the caller's because the limit has to apply to the set
+	// the caller actually acts on. Filtering a wider selection afterwards puts
+	// the rows it discards ahead of the rows it wants — and since queued and
+	// rejected rows are never settled by anything, on an installation that has
+	// enough of them the pass returns nothing but those, forever.
 	//
 	// total is how many such rows exist, so a caller that got fewer than that
-	// can say so. The cap is there because `task` is the largest table of a
-	// typical installation and a long-neglected one can hold a lot of stale
-	// unfinished rows; recovery must not turn a restart into a full-table
-	// materialization.
-	GetUnfinishedTasks(limit int) (tasks []Task, total int, err error)
+	// can say so; it equals len(tasks) unless the limit was reached, and is
+	// then counted by a second statement outside any transaction, so it is a
+	// report rather than a guarantee. The cap is there because `task` is the
+	// largest table of a typical installation and a long-neglected one can hold
+	// a lot of stale unfinished rows; recovery must not turn a restart into a
+	// full-table materialization.
+	GetUnfinishedTasks(statuses []task_logger.TaskStatus, limit int) (tasks []Task, total int, err error)
 	DeleteTaskWithOutputs(projectID int, taskID int) error
 	GetTaskOutputs(projectID int, taskID int, params RetrieveQueryParams) ([]TaskOutput, error)
 	CreateTaskOutput(output TaskOutput) (TaskOutput, error)

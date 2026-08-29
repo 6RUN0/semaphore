@@ -214,11 +214,19 @@ func (t *TaskRunner) SetStatus(status task_logger.TaskStatus) {
 // would show "resolving" until the claim's 30-minute expiry, with no error and
 // no way to retry (issue class: a typo in the inventory script).
 //
-// A successful resolve needs nothing here: StoreResolved has already replaced
-// the pending row. The store call is scoped to this task's own claim, so a
-// claim that expired and was taken over by a later refresh stays untouched.
+// A success is settled too, and for the same reason: the store call is scoped
+// to a claim that is still pending, so a resolve that did report its hosts has
+// nothing left to settle — StoreResolved already replaced the row. What is left
+// is a task that ended successfully without ever reporting a list: an older
+// runner that does not know the field, or a report the server refused because
+// the inventory that ran was not the one the task asked for. Leaving those
+// pending locks the inventory for the claim's 30 minutes, with no error shown
+// and no way to retry.
+//
+// The claim is scoped to this task's own id, so one that expired and was taken
+// over by a later refresh stays untouched.
 func (t *TaskRunner) settleInventoryResolve(status task_logger.TaskStatus) {
-	if !status.IsFinished() || status == task_logger.TaskSuccessStatus {
+	if !status.IsFinished() {
 		return
 	}
 
@@ -230,11 +238,16 @@ func (t *TaskRunner) settleInventoryResolve(status task_logger.TaskStatus) {
 		return
 	}
 
+	message := "the resolve task ended with status " + string(status)
+	if status == task_logger.TaskSuccessStatus {
+		message = "the resolve task finished without reporting a host list"
+	}
+
 	err := t.pool.store.FailInventorySnapshotResolve(
 		t.Task.ProjectID,
 		*t.Task.InventoryID,
 		t.Task.ID,
-		"the resolve task ended with status "+string(status),
+		message,
 	)
 
 	if err != nil {

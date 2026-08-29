@@ -88,7 +88,12 @@ jobs:
           SEMAPHORE_TEST_MYSQL: ${{ matrix.mysql }}
           SEMAPHORE_TEST_POSTGRES: ${{ matrix.postgres }}
           SUITE: ${{ matrix.suite }}
-        run: go test ./db/sql/ -count=1 -v -run "$SUITE"
+        # The name is anchored so a partial match cannot stand in for the
+        # suite, and TestMain in the package fails the run when the suite this
+        # job selected never executed -- `go test -run` exits 0 when nothing
+        # matches, which would make the whole matrix green while testing
+        # nothing.
+        run: go test ./db/sql/ -count=1 -v -run "^$SUITE\$"
 
       - name: Show the database log on failure
         if: failure()

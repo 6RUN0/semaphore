@@ -22,9 +22,20 @@ unleash:
   # of 3. Measured on ./db, whose own tests take ~20 ms: with the default, 487
   # of 489 mutants came back TIMED OUT and the report was worthless; at 60,
   # three did. 100 leaves margin on a loaded machine.
+  #
+  # The coefficient is multiplicative and this file is repository-wide, so it is
+  # calibrated for packages whose tests take milliseconds. For a package whose
+  # suite takes tens of seconds (./api, with its e2e tests) it turns a single
+  # looping mutant into hours of waiting; lower it there with
+  # --timeout-coefficient rather than editing this value.
   timeout-coefficient: 100
 
-  # Quality gates: a non-zero threshold makes gremlins exit non-zero when
+  # Diagnostic, not a gate: nothing in CI runs gremlins, and the thresholds
+  # below are zero, so the scores reached by a run are not held anywhere. Raise
+  # them per package on the command line when a package's score is worth
+  # defending.
+  #
+  # A non-zero threshold makes gremlins exit non-zero when
   # efficacy (killed over killed+lived) or mutant coverage falls below it. Left
   # off, and meant to be raised per package on the command line — coverage here
   # is uneven enough that one repository-wide number would be either

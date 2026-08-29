@@ -13,6 +13,28 @@ const MaxInventoryHostNameLength = 255
 // MaxInventorySnapshotErrorLength mirrors the width of the error column.
 const MaxInventorySnapshotErrorLength = 1000
 
+// TruncateSnapshotError cuts a message to what the error column holds.
+//
+// It cuts by runes, not bytes: a byte cut can split a multi-byte character, and
+// PostgreSQL rejects the resulting invalid UTF-8 — which would turn a long
+// error message into a failed write.
+//
+// Every caller that settles a snapshot passes a message of its own making, and
+// some of them pass one built from an external error (a git failure, an
+// inventory parser's complaint). A message over the limit is not a truncated
+// row on MySQL in strict mode or on PostgreSQL: it is a rejected write, which
+// leaves the claim pending until it expires. The store applies this to whatever
+// it is handed, so no caller has to remember it.
+func TruncateSnapshotError(message string) string {
+	runes := []rune(message)
+
+	if len(runes) <= MaxInventorySnapshotErrorLength {
+		return message
+	}
+
+	return string(runes[:MaxInventorySnapshotErrorLength])
+}
+
 // MaxInventoryHostPageSize caps one page of a host listing. A snapshot may
 // hold tens of thousands of hosts, and serving them in one response is what
 // storing them as rows was meant to avoid.
@@ -166,6 +188,12 @@ func NewInventorySnapshotContent(hosts []string, groups map[string][]string) Inv
 
 // InventoryHostFilter narrows a host listing. An empty filter returns the
 // whole snapshot up to Limit.
+//
+// Results are ordered by name, but what that order is comes from the database:
+// host names are stored utf8mb4_bin on MySQL, BINARY on SQLite and in the
+// database's own collation on PostgreSQL. The order is stable within one
+// installation, which is what offset paging needs; it is not the same order
+// across engines.
 type InventoryHostFilter struct {
 	// Group restricts the listing to the members of one group.
 	Group string

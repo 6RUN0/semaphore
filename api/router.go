@@ -168,7 +168,8 @@ func Route(
 	publicAPIRouter.HandleFunc("/auth/oidc/{provider}/redirect/{redirect_path:.*}", oidcRedirect).Methods("GET")
 
 	internalAPI := publicAPIRouter.PathPrefix("/internal").Subrouter()
-	internalAPI.HandleFunc("/runners", runners.RegisterRunner).Methods("POST")
+	internalAPI.Handle("/runners",
+		runners.RegistrationBodyLimitMiddleware(http.HandlerFunc(runners.RegisterRunner))).Methods("POST")
 
 	runnersAPI := internalAPI.PathPrefix("/runners").Subrouter()
 	runnersAPI.Use(runners.BodyLimitMiddleware, runners.RunnerMiddleware)

@@ -1,10 +1,12 @@
 package db_lib
 
 import (
+	"bytes"
 	"fmt"
 	"os"
 	"os/exec"
 	"strings"
+	"time"
 
 	"github.com/semaphoreui/semaphore/pkg/ssh"
 
@@ -74,6 +76,86 @@ func (c CmdGitClient) run(r GitRepository, targetDir GitRepositoryDirType, args 
 	r.Logger.LogCmd(cmd)
 
 	return cmd.Run()
+}
+
+// lsRemoteTimeout bounds a `git ls-remote`.
+//
+// It is the one git call made while an HTTP request waits on it — the inventory
+// snapshot read path asks for the remote head, and the repository branch list
+// is served the same way — and git has no timeout of its own. A host that
+// accepts the connection and then answers nothing leaves the request goroutine
+// and the git process waiting for as long as the client is willing to wait,
+// and every retry adds another pair. The other git operations are not bounded:
+// a clone or a pull is as long as the repository is big, and only this one has
+// a size that does not depend on the repository.
+const lsRemoteTimeout = 2 * time.Minute
+
+// killGrace bounds the wait for a killed command to be reaped. On Unix the kill
+// reaches the whole process group and Wait returns at once; on Windows a
+// surviving grandchild can hold the output pipe open, and waiting on it forever
+// is what this avoids.
+const killGrace = 5 * time.Second
+
+// runBounded runs cmd and returns what it wrote to standard output, killing it
+// and everything it spawned once timeout expires.
+func runBounded(cmd *exec.Cmd, timeout time.Duration) ([]byte, error) {
+	// Own process group: killing only the direct child leaves whatever it
+	// spawned (ssh, a credential helper) holding the inherited output pipe,
+	// and Wait would then block on that pipe rather than return.
+	isolateProcessGroup(cmd)
+
+	var stdout bytes.Buffer
+	cmd.Stdout = &stdout
+
+	if err := cmd.Start(); err != nil {
+		return nil, err
+	}
+
+	done := make(chan error, 1)
+	go func() {
+		done <- cmd.Wait()
+	}()
+
+	select {
+	case err := <-done:
+		return stdout.Bytes(), err
+	case <-time.After(timeout):
+		killProcessGroup(cmd)
+
+		select {
+		case <-done:
+		case <-time.After(killGrace):
+		}
+
+		subcommand := "command"
+		if len(cmd.Args) > 1 {
+			subcommand = cmd.Args[1]
+		}
+
+		return nil, fmt.Errorf("git %s timed out after %s", subcommand, timeout)
+	}
+}
+
+func (c CmdGitClient) outputWithin(
+	r GitRepository,
+	targetDir GitRepositoryDirType,
+	timeout time.Duration,
+	args ...string,
+) (out string, err error) {
+	keyInstallation, err := c.keyInstaller.Install(r.Repository.SSHKey, db.AccessKeyRoleGit, r.Logger)
+	if err != nil {
+		return
+	}
+
+	defer keyInstallation.Destroy() //nolint: errcheck
+
+	bytes, err := runBounded(c.makeCmd(r, targetDir, keyInstallation, args...), timeout)
+	if err != nil {
+		return
+	}
+
+	out = strings.Trim(string(bytes), " \n")
+	return
 }
 
 func (c CmdGitClient) output(r GitRepository, targetDir GitRepositoryDirType, args ...string) (out string, err error) {
@@ -168,7 +250,8 @@ func (c CmdGitClient) GetLastCommitHash(r GitRepository) (hash string, err error
 }
 
 func (c CmdGitClient) GetLastRemoteCommitHash(r GitRepository) (hash string, err error) {
-	out, err := c.output(r, GitRepositoryTmpPath, "ls-remote", "--end-of-options", r.Repository.GetGitURL(false), r.Repository.GitBranch)
+	out, err := c.outputWithin(r, GitRepositoryTmpPath, lsRemoteTimeout,
+		"ls-remote", "--end-of-options", r.Repository.GetGitURL(false), r.Repository.GitBranch)
 	if err != nil {
 		return
 	}
@@ -186,7 +269,8 @@ func (c CmdGitClient) GetLastRemoteCommitHash(r GitRepository) (hash string, err
 }
 
 func (c CmdGitClient) GetRemoteBranches(r GitRepository) ([]string, error) {
-	out, err := c.output(r, GitRepositoryTmpPath, "ls-remote", "--heads", "--end-of-options", r.Repository.GetGitURL(false))
+	out, err := c.outputWithin(r, GitRepositoryTmpPath, lsRemoteTimeout,
+		"ls-remote", "--heads", "--end-of-options", r.Repository.GetGitURL(false))
 	if err != nil {
 		return nil, err
 	}

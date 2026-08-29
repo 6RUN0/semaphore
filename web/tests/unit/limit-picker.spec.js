@@ -170,6 +170,52 @@ describe('LimitPicker.vue', () => {
     wrapper.destroy();
   });
 
+  // A resolve whose task no runner picks up stays pending until the server
+  // expires the claim half an hour later. At a fixed interval an open tab
+  // would ask about it hundreds of times, once per open tab.
+  it('stretches the interval between polls', () => {
+    const wrapper = mountPicker();
+
+    const intervals = [];
+    for (let i = 0; i < 12; i += 1) {
+      intervals.push(wrapper.vm.pollInterval);
+      wrapper.vm.schedulePoll();
+    }
+
+    expect(intervals[1]).to.be.above(intervals[0]);
+    expect(intervals[intervals.length - 1]).to.be.at.most(30000);
+    expect(intervals[intervals.length - 1]).to.be.above(intervals[1]);
+    wrapper.destroy();
+  });
+
+  // Past the claim's own lifetime the server settles it, so there is nothing
+  // left for the poll to observe.
+  it('gives up polling once the claim can no longer be pending', () => {
+    const wrapper = mountPicker();
+
+    wrapper.setData({ pollDeadline: Date.now() - 1 });
+    wrapper.vm.schedulePoll();
+
+    expect(wrapper.vm.pollTimeout).to.equal(null);
+    expect(wrapper.vm.error).to.equal('hostListResolveTimedOut');
+    wrapper.destroy();
+  });
+
+  // The group list is capped by the server like the host list, but it has no
+  // search to narrow it with: without the notice a group the user cannot see
+  // looks like a group that does not exist.
+  it('detects that the group page is full', async () => {
+    const wrapper = mountPicker();
+
+    await wrapper.setData({ groups: [{ name: 'web', host_count: 1 }] });
+    expect(wrapper.vm.groupPageIsFull).to.equal(false);
+
+    await wrapper.setData({
+      groups: Array.from({ length: 500 }, (unused, i) => ({ name: `g${i}`, host_count: 1 })),
+    });
+    expect(wrapper.vm.groupPageIsFull).to.equal(true);
+  });
+
   // Route parameters arrive as strings; the picker must accept them rather
   // than reject the prop and blank itself.
   it('accepts a string inventory id', () => {
@@ -289,5 +335,83 @@ describe('LimitPicker.vue', () => {
       expect(wrapper.vm.error).to.equal(null);
       expect(wrapper.vm.hosts).to.deep.equal([{ name: 'fresh01' }]);
     });
+  });
+
+  // Both timers outlive the component otherwise: the picker is destroyed
+  // whenever the task dialog closes, and a poll firing afterwards asks about an
+  // inventory nobody is looking at and writes to a component that is gone.
+  it('drops both timers when it is destroyed', (done) => {
+    const wrapper = mountPicker();
+
+    let fired = false;
+    wrapper.vm.searchTimeout = setTimeout(() => { fired = true; }, 5);
+    wrapper.vm.pollTimeout = setTimeout(() => { fired = true; }, 5);
+
+    wrapper.destroy();
+
+    setTimeout(() => {
+      expect(fired).to.equal(false);
+      done();
+    }, 30);
+  });
+
+  // Typing is one request per debounce window, not one per keystroke: every
+  // request costs the server a snapshot freshness check.
+  it('collapses a burst of typing into one host request', async () => {
+    const wrapper = mountPicker({ inventoryId: 9 });
+
+    // created() has a load() of its own in flight; the watcher stands down
+    // while that runs, which is what the next test covers.
+    await wrapper.setData({ snapshot: { status: 'ok' }, loading: false });
+
+    let requests = 0;
+    wrapper.vm.loadHosts = () => { requests += 1; };
+
+    await wrapper.setData({ search: 'w' });
+    await wrapper.setData({ search: 'we' });
+    await wrapper.setData({ search: 'web' });
+
+    expect(requests).to.equal(0);
+
+    await new Promise((resolve) => { setTimeout(resolve, 400); });
+
+    expect(requests).to.equal(1);
+    wrapper.destroy();
+  });
+
+  // load() clears the search as part of its own flow and calls loadHosts
+  // itself; the watcher reacting to that clearing too would double every load.
+  it('does not react to the search its own load reset', async () => {
+    const wrapper = mountPicker({ inventoryId: 9 });
+
+    let requests = 0;
+    wrapper.vm.loadHosts = () => { requests += 1; };
+
+    await wrapper.setData({ loading: true, search: 'web' });
+
+    expect(wrapper.vm.searchTimeout).to.equal(null, 'no debounce timer may be armed');
+
+    await new Promise((resolve) => { setTimeout(resolve, 400); });
+
+    expect(requests).to.equal(0);
+    wrapper.destroy();
+  });
+
+  // The picker stays mounted while the task dialog has no inventory selected
+  // yet, and the snapshot routes need one in their path.
+  it('clears what it shows when the inventory goes away', async () => {
+    const wrapper = mountPicker();
+
+    await wrapper.setData({
+      snapshot: { status: 'ok' },
+      groups: [{ name: 'web', host_count: 1 }],
+      hosts: [{ name: 'web01' }],
+    });
+
+    await wrapper.vm.load();
+
+    expect(wrapper.vm.snapshot).to.equal(null);
+    expect(wrapper.vm.groups).to.deep.equal([]);
+    expect(wrapper.vm.hosts).to.deep.equal([]);
   });
 });

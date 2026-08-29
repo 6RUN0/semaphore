@@ -1717,7 +1717,7 @@ func validateAccessKeyEncryption(key string) error {
 	}
 }
 
-// reservedTargetHostVarNames are names Ansible already owns. Naming one of them
+// reservedTargetHostVarNames returns the names Ansible already owns. Naming one of them
 // as the target host variable makes the result undefined: depending on the name,
 // Ansible either warns and ignores the value or lets the extra variable win for
 // the whole run, and either way the playbook stops seeing what it expects.
@@ -1734,31 +1734,33 @@ func validateAccessKeyEncryption(key string) error {
 // The list is a guard against the worst names, not a proof of safety: Ansible
 // also reserves every Play, Role, Block and Task keyword, and those change
 // between releases.
-var reservedTargetHostVarNames = map[string]bool{
-	// Magic variables.
-	"group_names":              true,
-	"groups":                   true,
-	"hostvars":                 true,
-	"inventory_dir":            true,
-	"inventory_file":           true,
-	"inventory_hostname":       true,
-	"inventory_hostname_short": true,
-	"omit":                     true,
-	"play_hosts":               true,
-	"playbook_dir":             true,
-	"role_name":                true,
-	"role_names":               true,
-	"role_path":                true,
+func reservedTargetHostVarNames() map[string]bool {
+	return map[string]bool{
+		// Magic variables.
+		"group_names":              true,
+		"groups":                   true,
+		"hostvars":                 true,
+		"inventory_dir":            true,
+		"inventory_file":           true,
+		"inventory_hostname":       true,
+		"inventory_hostname_short": true,
+		"omit":                     true,
+		"play_hosts":               true,
+		"playbook_dir":             true,
+		"role_name":                true,
+		"role_names":               true,
+		"role_path":                true,
 
-	// Play and Task keywords a variable would shadow.
-	"environment": true,
-	"hosts":       true,
-	"vars":        true,
+		// Play and Task keywords a variable would shadow.
+		"environment": true,
+		"hosts":       true,
+		"vars":        true,
 
-	// Jinja globals.
-	"lookup": true,
-	"q":      true,
-	"query":  true,
+		// Jinja globals.
+		"lookup": true,
+		"q":      true,
+		"query":  true,
+	}
 }
 
 // validateTargetHostVar refuses a target host variable that would overwrite
@@ -1790,7 +1792,7 @@ func validateTargetHostVar(name string) error {
 		)
 	}
 
-	if reservedTargetHostVarNames[name] {
+	if reservedTargetHostVarNames()[name] {
 		return fmt.Errorf(
 			"target_host_var must not be %q: Ansible reserves that name and the outcome is undefined — it may warn and ignore the value, or let it win for the whole run",
 			name,

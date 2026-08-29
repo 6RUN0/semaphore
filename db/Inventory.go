@@ -61,8 +61,8 @@ func (e Inventory) GetFilename() string {
 }
 
 func (e Inventory) Validate() error {
-	if e.RunnerTag == nil && *e.RunnerTag == "" {
-		return common_errors.NewValidationError("template runner tag can not be empty")
+	if e.RunnerTag != nil && *e.RunnerTag == "" {
+		return common_errors.NewValidationError("inventory runner tag can not be empty")
 	}
 
 	return nil

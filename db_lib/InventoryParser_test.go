@@ -638,3 +638,82 @@ func TestParseYAMLInventoryKeepsScalarHostItems(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, []string{"10", "host01"}, parsed.Hosts)
 }
+
+// Range bounds are user input, and the span arithmetic used to size the result
+// runs on plain int. [0:MaxInt64] overflowed the count into a negative number,
+// which passed the budget check and then panicked in make(); [MaxInt64:MaxInt64]
+// wrapped the loop variable, so the loop appended names forever.
+func TestParseINIInventoryRefusesRangeBoundsNearMaxInt(t *testing.T) {
+	_, err := ParseINIInventory("web[0:9223372036854775807]")
+
+	var tooLarge InventoryTooLargeError
+	require.ErrorAs(t, err, &tooLarge)
+
+	parsed, err := ParseINIInventory("web[9223372036854775807:9223372036854775807]")
+
+	require.NoError(t, err)
+	assert.Equal(t, []string{"web9223372036854775807"}, parsed.Hosts)
+}
+
+// Expansion recurses once per bracket group and rebuilds the whole entry at
+// every level, while a group such as [0:0] spends no host budget at all — so
+// the number of groups has to be capped on its own.
+func TestParseINIInventoryRefusesTooManyRangePatterns(t *testing.T) {
+	_, err := ParseINIInventory("h" + strings.Repeat("[0:0]", maxHostPatternRanges+1))
+
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "range patterns")
+
+	parsed, err := ParseINIInventory("h" + strings.Repeat("[0:0]", maxHostPatternRanges))
+
+	require.NoError(t, err)
+	assert.Equal(t, []string{"h" + strings.Repeat("0", maxHostPatternRanges)}, parsed.Hosts)
+}
+
+func TestParseINIInventoryRefusesOverlongHostEntry(t *testing.T) {
+	_, err := ParseINIInventory(strings.Repeat("h", maxHostPatternLength+1))
+
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "longer than")
+}
+
+// Ansible's ini plugin allows a trailing comment on a section header. Reading
+// the line as a host instead loses the group and sends everything below it to
+// "ungrouped".
+func TestParseINIInventoryReadsSectionHeaderWithTrailingComment(t *testing.T) {
+	parsed, err := ParseINIInventory("[web] # production\nhost1\n")
+
+	require.NoError(t, err)
+	assert.Equal(t, []string{"host1"}, parsed.Hosts)
+	require.Len(t, parsed.Groups, 1)
+	assert.Equal(t, "web", parsed.Groups[0].Name)
+	assert.Equal(t, []string{"host1"}, parsed.Groups[0].Hosts)
+}
+
+// Ansible's parse_address splits the port off the host name, and everything
+// built from the snapshot (--limit, the target host variable) addresses hosts
+// by name, so a name carrying a port would match nothing.
+func TestParseINIInventoryStripsHostPort(t *testing.T) {
+	tests := []struct {
+		name     string
+		content  string
+		expected []string
+	}{
+		{"plain host with port", "host1:2222", []string{"host1"}},
+		{"host without port", "host1", []string{"host1"}},
+		{"range with port", "web[01:02].example.com:2222", []string{"web01.example.com", "web02.example.com"}},
+		{"range without port", "web[01:02]", []string{"web01", "web02"}},
+		{"unbracketed ipv6 keeps its trailing group", "fe80::1", []string{"fe80::1"}},
+		{"trailing colon is not a port", "host1:", []string{"host1:"}},
+		{"non-numeric suffix is not a port", "host1:ssh", []string{"host1:ssh"}},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			parsed, err := ParseINIInventory(tt.content)
+
+			require.NoError(t, err)
+			assert.Equal(t, tt.expected, parsed.Hosts)
+		})
+	}
+}

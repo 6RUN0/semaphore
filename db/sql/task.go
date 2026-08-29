@@ -452,8 +452,10 @@ func (d *SqlDb) GetUiCount() (int, error) {
 	return 1, nil
 }
 
-func (d *SqlDb) GetUnfinishedTasks(limit int) (tasks []db.Task, total int, err error) {
-	statuses := task_logger.UnfinishedTaskStatuses()
+func (d *SqlDb) GetUnfinishedTasks(statuses []task_logger.TaskStatus, limit int) (tasks []db.Task, total int, err error) {
+	if len(statuses) == 0 || limit <= 0 {
+		return
+	}
 
 	placeholders := make([]string, len(statuses))
 	args := make([]any, len(statuses))
@@ -467,15 +469,9 @@ func (d *SqlDb) GetUnfinishedTasks(limit int) (tasks []db.Task, total int, err e
 	// a scan of the largest table in the database.
 	condition := " from task where status in (" + strings.Join(placeholders, ",") + ")"
 
-	count, err := d.Sql().SelectInt(d.PrepareQuery("select count(1)"+condition), args...)
-	if err != nil {
-		return
-	}
-	total = int(count)
-
-	// Oldest first: if there are more unfinished rows than the caller asked
-	// for, the ones left over are the freshest, which are also the ones most
-	// likely to be settled by something else (a live runner's next report).
+	// Oldest first: if there are more matching rows than the caller asked for,
+	// the ones left over are the freshest, which are also the ones most likely
+	// to be settled by something else (a live runner's next report).
 	//
 	// selectAll runs PrepareQuery itself; only the raw ? placeholders belong
 	// here, like everywhere else in this file.
@@ -484,6 +480,24 @@ func (d *SqlDb) GetUnfinishedTasks(limit int) (tasks []db.Task, total int, err e
 		"select *"+condition+" order by id limit ?",
 		append(args, limit)...,
 	)
+	if err != nil {
+		return
+	}
+
+	total = len(tasks)
+
+	// Counted only when the limit was reached: below it the rows in hand are
+	// the whole answer, and a second statement could only disagree with them.
+	if len(tasks) < limit {
+		return
+	}
+
+	count, err := d.Sql().SelectInt(d.PrepareQuery("select count(1)"+condition), args...)
+	if err != nil {
+		return
+	}
+
+	total = int(count)
 
 	return
 }

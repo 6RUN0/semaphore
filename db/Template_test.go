@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"testing"
 
+	"github.com/semaphoreui/semaphore/util"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -206,4 +207,72 @@ func TestTemplateValidate_RunnerTag(t *testing.T) {
 	assert.EqualError(t, tpl(strPtr("")).Validate(), "template runner tag can not be empty")
 	assert.NoError(t, tpl(strPtr("gpu")).Validate())
 	assert.NoError(t, tpl(nil).Validate())
+}
+
+// withAnsibleApp makes the app whitelist accept "ansible" for one test: the
+// whitelist check runs before the params below are ever looked at, and other
+// tests in this package leave util.Config with a list of their own.
+func withAnsibleApp(t *testing.T) {
+	t.Helper()
+
+	saved := util.Config
+	t.Cleanup(func() { util.Config = saved })
+
+	util.Config = &util.ConfigType{Apps: map[string]util.App{"ansible": {}}}
+}
+
+// Template.Validate is the only place a template's limit is checked, so params
+// that do not parse used to skip the check entirely rather than fail it.
+func TestTemplateValidateRejectsUnparseableParams(t *testing.T) {
+	withAnsibleApp(t)
+
+	template := Template{
+		Name:        "broken",
+		Playbook:    "test.yml",
+		App:         AppAnsible,
+		InventoryID: new(int),
+		TaskParams:  MapStringAnyField{"limit": "web"},
+	}
+
+	err := template.Validate()
+
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "params are not valid")
+}
+
+func TestTemplateValidateChecksTheLimit(t *testing.T) {
+	withAnsibleApp(t)
+
+	template := Template{
+		Name:        "templated limit",
+		Playbook:    "test.yml",
+		App:         AppAnsible,
+		InventoryID: new(int),
+		TaskParams:  MapStringAnyField{"limit": []string{"{{ lookup('pipe', 'id') }}"}},
+	}
+
+	err := template.Validate()
+
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "must not contain")
+}
+
+// The whitelist check reads util.Config, which its own comment says is nil in
+// some unit tests — but the check dereferenced it regardless.
+func TestTemplateValidateWithoutAConfig(t *testing.T) {
+	saved := util.Config
+	t.Cleanup(func() { util.Config = saved })
+
+	util.Config = nil
+
+	template := Template{
+		Name:        "no config",
+		Playbook:    "test.yml",
+		App:         AppAnsible,
+		InventoryID: new(int),
+	}
+
+	assert.NotPanics(t, func() {
+		_ = template.Validate()
+	})
 }

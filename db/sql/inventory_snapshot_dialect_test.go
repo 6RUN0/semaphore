@@ -2,10 +2,13 @@ package sql
 
 import (
 	"database/sql"
+	"fmt"
 	"os"
 	"strings"
+	"sync"
 	"testing"
 	"time"
+	"unicode/utf8"
 
 	"github.com/semaphoreui/semaphore/db"
 	"github.com/semaphoreui/semaphore/util"
@@ -150,10 +153,14 @@ func newDialectTestStore(t *testing.T, dialect string, envName string) *SqlDb {
 }
 
 func TestInventorySnapshotOnDialectMySQL(t *testing.T) {
+	dialectSuitesRan.mysql.Store(true)
+
 	assertSnapshotWorksOn(t, newDialectTestStore(t, "mysql", envTestMySQL))
 }
 
 func TestInventorySnapshotOnDialectPostgres(t *testing.T) {
+	dialectSuitesRan.postgres.Store(true)
+
 	assertSnapshotWorksOn(t, newDialectTestStore(t, "postgres", envTestPostgres))
 }
 
@@ -348,6 +355,10 @@ func assertSnapshotWorksOn(t *testing.T, store *SqlDb) {
 	require.NoError(t, err)
 	assert.False(t, written, "a report whose claim is already settled must be refused")
 
+	assertClaimRaceHasOneWinner(t, store)
+	assertLongErrorFitsTheColumn(t, store)
+	assertConcurrentWritesConverge(t, store)
+
 	require.NoError(t, store.DeleteInventory(inventory.ProjectID, inventory.ID))
 
 	// PrepareQuery rewrites the placeholder for the dialect, which the store
@@ -357,4 +368,181 @@ func assertSnapshotWorksOn(t *testing.T, store *SqlDb) {
 		inventory.ID)
 	require.NoError(t, err)
 	assert.Equal(t, int64(0), count)
+}
+
+// assertClaimRaceHasOneWinner covers the claim of an inventory that has never
+// been synchronised, which is the one path that inserts the snapshot row:
+// UPDATE, SELECT and INSERT are three statements outside a transaction, so two
+// claimants can both reach the insert and the loser gets a duplicate key back.
+//
+// It belongs in the dialect run rather than beside the SQLite tests: the SQLite
+// pool holds a single connection, so writes there serialise in the driver and
+// the race cannot happen at all.
+func assertClaimRaceHasOneWinner(t *testing.T, store *SqlDb) {
+	t.Helper()
+
+	inventory := newSnapshotTestInventory(t, store)
+
+	const claimants = 8
+
+	var (
+		start   = make(chan struct{})
+		wg      sync.WaitGroup
+		mu      sync.Mutex
+		winners int
+		errs    []error
+	)
+
+	for i := 0; i < claimants; i++ {
+		wg.Add(1)
+
+		go func() {
+			defer wg.Done()
+
+			<-start
+
+			claimed, err := store.ClaimInventorySnapshotResolve(inventory.ProjectID, inventory.ID)
+
+			mu.Lock()
+			defer mu.Unlock()
+
+			if err != nil {
+				errs = append(errs, err)
+				return
+			}
+
+			if claimed {
+				winners++
+			}
+		}()
+	}
+
+	close(start)
+	wg.Wait()
+
+	assert.Empty(t, errs, "losing the race must read as a taken claim, not as an error")
+	assert.Equal(t, 1, winners, "exactly one claimant may win")
+
+	// The race above cannot be forced to overlap on demand, and the whole fix
+	// rests on the engine's duplicate-key error being recognised as a lost
+	// race rather than reported as a failure. Provoke that error directly:
+	// isSnapshotWriteConflict reads driver codes, which is exactly what a
+	// SQLite-only test cannot exercise.
+	_, err := store.exec(
+		"insert into project__inventory_snapshot "+
+			"(inventory_id, project_id, status, error, source_hash, host_count, created) "+
+			"values (?, ?, ?, '', '', 0, ?)",
+		inventory.ID, inventory.ProjectID, db.InventorySnapshotStatusPending, time.Now().UTC())
+
+	require.Error(t, err, "the row is already there, so a second insert must fail")
+	assert.True(t, isSnapshotWriteConflict(err),
+		"the engine's duplicate-key error must read as a lost race: %v", err)
+}
+
+// assertLongErrorFitsTheColumn pins the width of the error column against what
+// the callers may hand the store.
+//
+// SQLite ignores a varchar's declared length, so a message over the limit is
+// stored whole there and every SQLite test passes without the truncation. MySQL
+// in strict mode answers "Data too long for column 'error'" and PostgreSQL
+// "value too long for type character varying(1000)" — and since this write is
+// how a failed resolve settles its claim, the rejection would leave the claim
+// pending until it expires.
+func assertLongErrorFitsTheColumn(t *testing.T, store *SqlDb) {
+	t.Helper()
+
+	inventory := newSnapshotTestInventory(t, store)
+	writeSampleSnapshot(t, store, inventory)
+
+	// Multi-byte, so that a truncation cutting bytes rather than runes leaves
+	// invalid UTF-8 behind — which PostgreSQL rejects outright.
+	long := strings.Repeat("ы", db.MaxInventorySnapshotErrorLength+50)
+
+	claimed, err := store.ClaimInventorySnapshotResolve(inventory.ProjectID, inventory.ID)
+	require.NoError(t, err)
+	require.True(t, claimed)
+
+	task := newSnapshotResolveTask(t, store, inventory)
+	require.NoError(t, store.AssignInventorySnapshotResolveTask(inventory.ProjectID, inventory.ID, task.ID))
+
+	require.NoError(t, store.FailInventorySnapshotResolve(inventory.ProjectID, inventory.ID, task.ID, long),
+		"a long failure message must settle the claim, not be rejected by the engine")
+
+	snapshot, err := store.GetInventorySnapshot(inventory.ProjectID, inventory.ID)
+	require.NoError(t, err)
+	assert.Equal(t, db.InventorySnapshotStatusError, snapshot.Status)
+	assert.Equal(t, db.MaxInventorySnapshotErrorLength, utf8.RuneCountInString(snapshot.Error))
+
+	// The same message on the insert path, which writes the column too.
+	require.NoError(t, store.SetInventorySnapshot(db.InventorySnapshot{
+		InventoryID: inventory.ID,
+		ProjectID:   inventory.ProjectID,
+		Status:      db.InventorySnapshotStatusError,
+		Error:       long,
+		SourceHash:  "hash-long-error",
+		Created:     time.Now().UTC(),
+	}, db.InventorySnapshotContent{}))
+
+	snapshot, err = store.GetInventorySnapshot(inventory.ProjectID, inventory.ID)
+	require.NoError(t, err)
+	assert.Equal(t, db.MaxInventorySnapshotErrorLength, utf8.RuneCountInString(snapshot.Error))
+}
+
+// assertConcurrentWritesConverge is the concurrent rewrite of one snapshot: a
+// whole-list replacement is a delete of four tables and an insert into four
+// more, and two of those running at once deadlock on MySQL and serialisation-
+// fail on PostgreSQL. SetInventorySnapshot answers that with a retry loop, and
+// the loop only ever runs when the engine reports the conflict.
+//
+// The same eight goroutines against SQLite prove nothing: its pool holds one
+// connection, so the writes queue up in the driver and no retry ever happens —
+// that test stays green with the retry loop deleted outright.
+func assertConcurrentWritesConverge(t *testing.T, store *SqlDb) {
+	t.Helper()
+
+	inventory := newSnapshotTestInventory(t, store)
+
+	const writers = 8
+
+	var (
+		start = make(chan struct{})
+		wg    sync.WaitGroup
+		errs  = make([]error, writers)
+	)
+
+	for i := 0; i < writers; i++ {
+		wg.Add(1)
+
+		go func(slot int) {
+			defer wg.Done()
+
+			<-start
+
+			errs[slot] = store.SetInventorySnapshot(db.InventorySnapshot{
+				InventoryID: inventory.ID,
+				ProjectID:   inventory.ProjectID,
+				Status:      db.InventorySnapshotStatusOK,
+				SourceHash:  fmt.Sprintf("hash-%d", slot),
+				Created:     time.Now().UTC(),
+			}, sampleSnapshotContent())
+		}(i)
+	}
+
+	close(start)
+	wg.Wait()
+
+	for slot, err := range errs {
+		assert.NoError(t, err, "writer %d lost a conflict the retry loop should have absorbed", slot)
+	}
+
+	// Whichever writer landed last, the row and its host rows have to describe
+	// the same snapshot: the replacement is transactional, so a torn result
+	// would mean the transaction is not doing its job.
+	snapshot, err := store.GetInventorySnapshot(inventory.ProjectID, inventory.ID)
+	require.NoError(t, err)
+	assert.Equal(t, db.InventorySnapshotStatusOK, snapshot.Status)
+
+	hosts, err := store.GetInventorySnapshotHosts(inventory.ProjectID, inventory.ID, db.InventoryHostFilter{})
+	require.NoError(t, err)
+	assert.Len(t, hosts, snapshot.HostCount)
 }

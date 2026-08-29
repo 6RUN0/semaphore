@@ -379,3 +379,18 @@ func TestParseInventorySourceKeepsServerPathsOutOfErrors(t *testing.T) {
 		assert.NotContains(t, err.Error(), root)
 	})
 }
+
+// An inventory whose path inside the repository is empty used to resolve to the
+// checkout root and be walked as a directory inventory, turning the top-level
+// keys of every YAML file in the repository into group names.
+func TestParseInventorySourceRefusesAnEmptyPath(t *testing.T) {
+	root := t.TempDir()
+	require.NoError(t, os.WriteFile(filepath.Join(root, "unrelated.yml"), []byte("secrets:\n  password: hunter2\n"), 0o600))
+
+	for _, relPath := range []string{"", "   "} {
+		_, err := ParseInventorySource(root, relPath)
+
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "no path inside its repository")
+	}
+}

@@ -1,11 +1,9 @@
 package server
 
 import (
-	"strings"
 	"sync"
 	"testing"
 	"time"
-	"unicode/utf8"
 
 	"github.com/semaphoreui/semaphore/db"
 	"github.com/semaphoreui/semaphore/db_lib"
@@ -13,9 +11,10 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-// The snapshot read path reaches git on an unauthenticated GET, so what it
-// spawns and how often is a security property, not a performance detail
-// (review findings C1, M-2). These pin the three guards: git operations on one
+// The snapshot read path reaches git on a GET that any project member may
+// issue, so what it spawns and how often is a security property, not a
+// performance detail.
+// These pin the three guards: git operations on one
 // checkout directory never overlap, the remote head is cached between reads,
 // and a runner-resolved snapshot answers reads with no git at all.
 
@@ -73,6 +72,10 @@ func (c *countingGitClient) GetLastRemoteCommitHash(db_lib.GitRepository) (strin
 	c.mu.Lock()
 	c.remoteCalls++
 	c.mu.Unlock()
+
+	// Long enough that unserialized callers would reliably pile up in here,
+	// which is what an unreachable remote does for real.
+	time.Sleep(10 * time.Millisecond)
 
 	return "abc123", nil
 }
@@ -152,7 +155,7 @@ func TestConcurrentReadsNeverOverlapInTheCheckout(t *testing.T) {
 // they hold it. Without that second look each of them in turn checks the
 // repository out and rewrites four tables with the rows the first one already
 // wrote — and in HA that is multiplied by the number of nodes, on a path a
-// search box drives with one request per keystroke (review finding MEDIUM-3).
+// search box drives with one request per keystroke.
 func TestConcurrentReadsRebuildOnlyOnce(t *testing.T) {
 	snapshots := &lockedSnapshotManager{}
 	service, _ := newCountingHarness(t, snapshots)
@@ -225,8 +228,7 @@ func TestResolvedSnapshotAnswersReadsWithoutGit(t *testing.T) {
 }
 
 // filepath.Join collapses "..", so a hostile inventory filename could point
-// the local-repository fingerprint at any path on the server (review finding
-// L-3).
+// the local-repository fingerprint at any path on the server.
 func TestResolveUnderRootRefusesEscapes(t *testing.T) {
 	tests := []struct {
 		name     string
@@ -256,17 +258,76 @@ func TestResolveUnderRootRefusesEscapes(t *testing.T) {
 	}
 }
 
-// A byte cut can split a multi-byte character and PostgreSQL rejects the
-// resulting invalid UTF-8, turning a long error message into a failed write
-// (review finding L-4).
-func TestTruncateSnapshotErrorKeepsValidUTF8(t *testing.T) {
-	long := strings.Repeat("ы", db.MaxInventorySnapshotErrorLength+10)
+// The cache is read and filled in two steps with a network round trip in
+// between, so on a cold or just-expired entry every concurrent reader used to
+// spawn a `git ls-remote` of its own — one per keystroke per open picker, each
+// holding a request goroutine for as long as an unreachable remote takes.
+func TestConcurrentReadsFetchTheRemoteHeadOnlyOnce(t *testing.T) {
+	service, client := newCountingHarness(t, &lockedSnapshotManager{})
 
-	truncated := truncateSnapshotError(long)
+	var wg sync.WaitGroup
+	for i := 0; i < 8; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			_, _ = service.GetSnapshot(3, 7, nil)
+		}()
+	}
+	wg.Wait()
 
-	assert.True(t, utf8.ValidString(truncated))
-	assert.Equal(t, db.MaxInventorySnapshotErrorLength, utf8.RuneCountInString(truncated))
+	client.mu.Lock()
+	defer client.mu.Unlock()
+	assert.Equal(t, 1, client.remoteCalls,
+		"a cold cache must collapse into one ls-remote, not one per reader")
+}
 
-	short := "short"
-	assert.Equal(t, short, truncateSnapshotError(short))
+// slowSnapshotManager makes a rebuild take long enough for a second reader to
+// start one of its own.
+type slowSnapshotManager struct {
+	lockedSnapshotManager
+}
+
+func (m *slowSnapshotManager) SetInventorySnapshot(
+	snapshot db.InventorySnapshot,
+	content db.InventorySnapshotContent,
+) error {
+	time.Sleep(10 * time.Millisecond)
+
+	return m.lockedSnapshotManager.SetInventorySnapshot(snapshot, content)
+}
+
+// An inline inventory shares no checkout directory, but its readers share the
+// snapshot rows they replace. Without a lock of its own, every concurrent
+// reader of a stale snapshot parsed the inventory and rewrote four tables with
+// the rows the first one had already written.
+func TestConcurrentReadsOfAnInlineInventoryRebuildOnlyOnce(t *testing.T) {
+	setupSourceConfig(t)
+
+	// The write is slowed down on purpose: an inline rebuild is pure parsing,
+	// so without a delay all eight readers finish before any of them could
+	// observe another's write, and the test would pass with no lock at all.
+	snapshots := &slowSnapshotManager{}
+
+	service := NewInventorySnapshotService(
+		&mockInventoryManagerForSnapshot{inventory: staticInventory("[web]\nweb01\nweb02\n")},
+		snapshots,
+		&mockTemplateManager{},
+		&mockRepositoryManager{repository: remoteRepository()},
+		nil,
+	)
+
+	var wg sync.WaitGroup
+	for i := 0; i < 8; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			_, _ = service.GetSnapshot(3, 7, nil)
+		}()
+	}
+	wg.Wait()
+
+	snapshots.mu.Lock()
+	defer snapshots.mu.Unlock()
+	assert.Equal(t, 1, snapshots.writes,
+		"only the first reader through the lock may rebuild an inline inventory either")
 }

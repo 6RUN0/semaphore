@@ -50,6 +50,8 @@ func NewInventorySnapshotService(
 			repositoryRepo: repositoryRepo,
 			keyInstaller:   keyInstaller,
 			checkoutLock:   &keylock.KeyLock{},
+
+			remoteHeadFetchLock: &keylock.KeyLock{},
 		},
 	}
 }
@@ -147,8 +149,8 @@ func (s *InventorySnapshotServiceImpl) ensureFresh(
 			structuralHash := inventorySourceHash(inventory, inventorySource{})
 
 			// The same unreadable inventory, failing the same way: rewriting
-			// the row on every read would turn an unauthenticated GET into a
-			// write, so the stored answer stands as is.
+			// the row on every read would turn a GET any project member may
+			// issue into a write, so the stored answer stands as is.
 			if hasStored &&
 				stored.SourceHash == structuralHash &&
 				stored.Status == db.InventorySnapshotStatusUnsupported {
@@ -176,7 +178,7 @@ func (s *InventorySnapshotServiceImpl) ensureFresh(
 
 	// Everything below rebuilds, so it runs under the lock of the checkout
 	// directory the rebuild reads from.
-	unlock := s.locator.lock(source)
+	unlock := s.locator.lock(inventory, source)
 	defer unlock()
 
 	if fresh, freshErr := s.snapshotRepo.GetInventorySnapshot(projectID, inventoryID); freshErr == nil {
@@ -433,10 +435,10 @@ func (s *InventorySnapshotServiceImpl) write(
 		snapshot.Status = db.InventorySnapshotStatusOK
 	case isUnsupportedSourceError(cause):
 		snapshot.Status = db.InventorySnapshotStatusUnsupported
-		snapshot.Error = truncateSnapshotError(cause.Error())
+		snapshot.Error = db.TruncateSnapshotError(cause.Error())
 	default:
 		snapshot.Status = db.InventorySnapshotStatusError
-		snapshot.Error = truncateSnapshotError(cause.Error())
+		snapshot.Error = db.TruncateSnapshotError(cause.Error())
 	}
 
 	if err := s.snapshotRepo.SetInventorySnapshot(snapshot, content); err != nil {
@@ -604,17 +606,4 @@ func inventorySourceHash(inventory db.Inventory, source inventorySource) string 
 	sum := sha256.Sum256([]byte(string(inventory.Type) + "\n" + source.fingerprint))
 
 	return hex.EncodeToString(sum[:])
-}
-
-// truncateSnapshotError cuts by runes, not bytes: a byte cut can split a
-// multi-byte character, and PostgreSQL rejects the resulting invalid UTF-8,
-// which would turn a long error message into a failed write.
-func truncateSnapshotError(message string) string {
-	runes := []rune(message)
-
-	if len(runes) <= db.MaxInventorySnapshotErrorLength {
-		return message
-	}
-
-	return string(runes[:db.MaxInventorySnapshotErrorLength])
 }

@@ -258,10 +258,10 @@ func TestInventorySnapshot_ReportsServiceFailures(t *testing.T) {
 		expected int
 	}{
 		{"missing inventory", db.ErrNotFound, http.StatusNotFound},
-		// helpers.WriteError answers an unclassified error with 400 rather than
-		// 500. That is the convention across this API, so it is pinned here
-		// instead of being special-cased for these handlers.
-		{"unexpected failure", errors.New("database is gone"), http.StatusBadRequest},
+		// An unclassified error is the server's failure, not the request's:
+		// answering 400 told a client to fix its input and not to retry a
+		// database that had merely gone away.
+		{"unexpected failure", errors.New("database is gone"), http.StatusInternalServerError},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
 			svc := &mockInventorySnapshotService{err: tt.err}
@@ -322,7 +322,7 @@ func TestGetInventorySnapshotGroups_PassesThePaging(t *testing.T) {
 
 // Neither parameter can name anything wider than a host name column, so a
 // megabyte of either is a megabyte the database would compare against every
-// row for nothing (review finding m-11).
+// row for nothing.
 func TestGetInventorySnapshotHosts_CutsOversizedFilters(t *testing.T) {
 	svc := &mockInventorySnapshotService{}
 	ctrl := NewInventorySnapshotController(svc)

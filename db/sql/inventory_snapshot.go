@@ -2,10 +2,13 @@ package sql
 
 import (
 	"errors"
+	"math/rand"
 	"strings"
 	"time"
 
 	"github.com/go-gorp/gorp/v3"
+	"github.com/go-sql-driver/mysql"
+	"github.com/lib/pq"
 	"github.com/semaphoreui/semaphore/db"
 	"github.com/semaphoreui/semaphore/pkg/tz"
 )
@@ -20,11 +23,16 @@ const inventorySnapshotInsertBatch = 500
 // does not, so a literal ESCAPE '\' clause cannot be written portably.
 const likeEscapeChar = "!"
 
-var likeEscaper = strings.NewReplacer(
-	likeEscapeChar, likeEscapeChar+likeEscapeChar,
-	"%", likeEscapeChar+"%",
-	"_", likeEscapeChar+"_",
-)
+// escapeLikePattern makes a user's search string a literal for LIKE: the
+// wildcards and the escape character itself are prefixed with likeEscapeChar,
+// which the queries then name in an ESCAPE clause.
+func escapeLikePattern(search string) string {
+	return strings.NewReplacer(
+		likeEscapeChar, likeEscapeChar+likeEscapeChar,
+		"%", likeEscapeChar+"%",
+		"_", likeEscapeChar+"_",
+	).Replace(search)
+}
 
 func (d *SqlDb) GetInventorySnapshot(projectID int, inventoryID int) (snapshot db.InventorySnapshot, err error) {
 	err = d.selectOne(
@@ -63,7 +71,7 @@ func (d *SqlDb) GetInventorySnapshotHosts(
 		// case-insensitive, SQLite stays case-insensitive for ASCII and exact
 		// for the rest.
 		query += " and lower(h.name) like lower(?) escape '" + likeEscapeChar + "'"
-		args = append(args, "%"+likeEscaper.Replace(filter.Search)+"%")
+		args = append(args, "%"+escapeLikePattern(filter.Search)+"%")
 	}
 
 	limit := filter.Limit
@@ -115,11 +123,32 @@ func (d *SqlDb) GetInventorySnapshotGroups(
 }
 
 // inventorySnapshotWriteAttempts bounds the conflict retries of a snapshot
-// write; with two writers one retry suffices, the third attempt covers a
-// retry landing on yet another writer. The backoff only has to let the other
-// transaction commit.
-const inventorySnapshotWriteAttempts = 3
+// write. Two writers need one retry; the rest of the budget is for the case
+// several of them collide at once, where a retry lands on yet another writer.
+//
+// Measured against MariaDB 12.3 with eight concurrent writers of one snapshot
+// (assertConcurrentWritesConverge in the dialect run): at three attempts with a
+// fixed pause, five of the eight still came back with a conflict, because every
+// loser waited the same 50 ms and they all retried in step.
+const inventorySnapshotWriteAttempts = 5
+
+// inventorySnapshotWriteBackoff is the base of the wait between attempts. It
+// only has to outlast the other transaction's commit; snapshotWriteBackoff
+// spreads the retries out from there.
 const inventorySnapshotWriteBackoff = 50 * time.Millisecond
+
+// snapshotWriteBackoff returns how long to wait before the given attempt
+// (1 being the first retry).
+//
+// It doubles per attempt and keeps half the window random. Doubling is for the
+// collision that has not cleared yet; the random half is what stops a group of
+// losers from waking together and colliding again — with a fixed pause, the
+// conflict they were retrying is exactly what synchronised them.
+func snapshotWriteBackoff(attempt int) time.Duration {
+	window := inventorySnapshotWriteBackoff << (attempt - 1)
+
+	return window/2 + time.Duration(rand.Int63n(int64(window/2)))
+}
 
 func (d *SqlDb) SetInventorySnapshot(snapshot db.InventorySnapshot, content db.InventorySnapshotContent) error {
 	var err error
@@ -132,7 +161,7 @@ func (d *SqlDb) SetInventorySnapshot(snapshot db.InventorySnapshot, content db.I
 	// once the other has committed is the whole conflict resolution.
 	for attempt := 0; attempt < inventorySnapshotWriteAttempts; attempt++ {
 		if attempt > 0 {
-			time.Sleep(inventorySnapshotWriteBackoff)
+			time.Sleep(snapshotWriteBackoff(attempt))
 		}
 
 		err = d.setInventorySnapshotOnce(snapshot, content)
@@ -148,7 +177,39 @@ func (d *SqlDb) SetInventorySnapshot(snapshot db.InventorySnapshot, content db.I
 // isSnapshotWriteConflict recognises the three dialects' ways of saying two
 // transactions collided. Anything else — a foreign key, a full disk — is not
 // cured by retrying and is returned as is.
+//
+// The driver error codes are asked first because they are the only portable
+// signal: MySQL renders its messages in the server's lc_messages, so on an
+// installation running a non-English locale the substrings below match nothing
+// and the retry loop silently stops retrying. The substrings remain for SQLite,
+// whose driver reports its busy and constraint errors as plain text, and as a
+// fallback for a wrapped error the codes cannot be recovered from.
 func isSnapshotWriteConflict(err error) bool {
+	var mysqlErr *mysql.MySQLError
+	if errors.As(err, &mysqlErr) {
+		// 1213 deadlock found, 1062 duplicate entry, 1205 lock wait timeout,
+		// 1020 record has changed since last read.
+		//
+		// 1020 is what MariaDB 12 answers with where MySQL and MariaDB 10
+		// report a deadlock: the same collision between two writers replacing
+		// the same inventory, reported by the optimistic check rather than by
+		// the lock manager. Its own message ends in "try restarting
+		// transaction", which is exactly what the loop above does.
+		switch mysqlErr.Number {
+		case 1213, 1062, 1205, 1020:
+			return true
+		default:
+			return false
+		}
+	}
+
+	var pqErr *pq.Error
+	if errors.As(err, &pqErr) {
+		// 40P01 deadlock detected, 23505 unique violation, 40001 serialization
+		// failure.
+		return pqErr.Code == "40P01" || pqErr.Code == "23505" || pqErr.Code == "40001"
+	}
+
 	message := strings.ToLower(err.Error())
 
 	for _, marker := range []string{
@@ -226,7 +287,7 @@ func (d *SqlDb) replaceInventorySnapshot(
 		snapshot.InventoryID,
 		snapshot.ProjectID,
 		snapshot.Status,
-		snapshot.Error,
+		db.TruncateSnapshotError(snapshot.Error),
 		snapshot.SourceHash,
 		len(content.Hosts),
 		snapshot.Created,
@@ -460,6 +521,16 @@ func (d *SqlDb) ClaimInventorySnapshotResolve(projectID int, inventoryID int) (b
 	)
 
 	if err != nil {
+		// The update, the select and this insert are three statements outside a
+		// transaction, so another claimant — the other node in HA, or another
+		// request on this one — can insert the row in between. inventory_id is
+		// the primary key, so the loser gets a duplicate key back; that is the
+		// same verdict the update path reports as "somebody else holds the
+		// claim", and it must read the same way here rather than as a 500.
+		if isSnapshotWriteConflict(err) {
+			return false, nil
+		}
+
 		return false, err
 	}
 
@@ -488,7 +559,7 @@ func (d *SqlDb) ReleaseInventorySnapshotResolve(projectID int, inventoryID int, 
 	_, err := d.exec(
 		"update project__inventory_snapshot set status=?, error=? "+
 			"where project_id=? and inventory_id=? and status=? and task_id is null",
-		db.InventorySnapshotStatusError, message,
+		db.InventorySnapshotStatusError, db.TruncateSnapshotError(message),
 		projectID, inventoryID, db.InventorySnapshotStatusPending,
 	)
 
@@ -502,7 +573,7 @@ func (d *SqlDb) FailInventorySnapshotResolve(projectID int, inventoryID int, tas
 	_, err := d.exec(
 		"update project__inventory_snapshot set status=?, error=? "+
 			"where project_id=? and inventory_id=? and status=? and task_id=?",
-		db.InventorySnapshotStatusError, message,
+		db.InventorySnapshotStatusError, db.TruncateSnapshotError(message),
 		projectID, inventoryID, db.InventorySnapshotStatusPending, taskID,
 	)
 

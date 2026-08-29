@@ -410,7 +410,9 @@ func TestSnapshotAPI_RefusesNonMembers(t *testing.T) {
 	for _, suffix := range []string{"", "/hosts", "/groups"} {
 		w := api.request(http.MethodGet, api.snapshotPath(inventory, suffix), api.outsiderToken)
 
-		assert.NotEqual(t, http.StatusOK, w.Code, "GET %s must not succeed", suffix)
+		// The exact code, not merely "not 200": a test that accepts anything
+		// else stops telling a closed door from a broken endpoint.
+		assert.Equal(t, http.StatusNotFound, w.Code, "GET %s must not succeed", suffix)
 		assert.NotContains(t, w.Body.String(), "web01.example.com")
 	}
 }
@@ -448,6 +450,9 @@ func TestSnapshotAPI_RoutesAreRegistered(t *testing.T) {
 	t.Run("refresh rejects GET", func(t *testing.T) {
 		w := api.request(http.MethodGet, api.snapshotPath(inventory, "/refresh"), api.memberToken)
 
-		assert.NotEqual(t, http.StatusOK, w.Code)
+		// 404 rather than 405: the route is registered for POST only, and the
+		// subrouter it lives under has no other handler for this path, so mux
+		// reports it as unrouted.
+		assert.Equal(t, http.StatusNotFound, w.Code)
 	})
 }

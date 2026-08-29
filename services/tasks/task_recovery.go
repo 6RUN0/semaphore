@@ -19,12 +19,20 @@ import (
 // rather than swept up with the rest of task_logger.UnfinishedTaskStatuses().
 //
 // This is kept separate from UnfinishedTaskStatuses() rather than narrowing
-// that function, because GetUnfinishedTasks and other callers need the full
-// set for their own purposes.
-var recoverableTaskStatuses = map[task_logger.TaskStatus]bool{
-	task_logger.TaskRunningStatus:  true,
-	task_logger.TaskStartingStatus: true,
-	task_logger.TaskStoppingStatus: true,
+// that function, because other callers need the full set for their own
+// purposes.
+//
+// It is passed to the query rather than applied to its result: the limit has to
+// bound the rows recovery acts on. Filtering afterwards would let queued and
+// rejected rows — which nothing ever settles, so they accumulate forever and
+// hold the lowest ids — fill the whole selection and starve recovery of the
+// running tasks it exists for.
+func recoverableTaskStatuses() []task_logger.TaskStatus {
+	return []task_logger.TaskStatus{
+		task_logger.TaskRunningStatus,
+		task_logger.TaskStartingStatus,
+		task_logger.TaskStoppingStatus,
+	}
 }
 
 // maxTasksToRecover caps one recovery pass. Every row costs several queries
@@ -54,23 +62,33 @@ const maxTasksToRecover = 1000
 // the reconciler once its offline timeout expires.
 //
 // HA is excluded, but the check is util.HAEnabled(), not "am I the only
-// process on this database" — the two are not the same thing. A Kubernetes
-// Deployment at replicas:1 with the default RollingUpdate strategy starts the
-// new pod before the old one terminates (maxSurge rounds up to at least 1), and
-// a plain docker-compose or blue-green restart without HA configured does the
-// same: two processes briefly share one database with HA still turned off. If
-// this ever runs while the previous process is still alive, the statuses below
-// are chosen to limit the damage — a live process it steps on will simply
-// resume once it notices its task changed under it — but the pro build's
-// orphan cleaner (services/ha), which is meant to be the real answer for a
-// dead node in HA, does not fill this gap either: it only runs when HA is
-// enabled.
+// process on this database" — the two are not the same thing, and neither side
+// of that gap is covered here:
+//
+//   - With HA off, two processes still share the database for a moment on any
+//     rolling restart: a Kubernetes Deployment at replicas:1 with the default
+//     RollingUpdate strategy starts the new pod before the old one terminates
+//     (maxSurge rounds up to at least 1), and docker-compose or blue-green does
+//     the same. A pass that runs while the previous process is still working
+//     declares its live tasks stopped, and that process does not find out: a
+//     running task's row is only ever read again when its own status changes,
+//     so a long ansible run keeps going with the UI showing it finished. Should
+//     somebody restart it from there, two runs address the same hosts, which is
+//     what AllowParallelTasks=false exists to prevent.
+//   - With HA on, nothing here runs at all, so a node that dies leaves its local
+//     tasks "running" indefinitely. The pro build's orphan cleaner (services/ha)
+//     is the answer meant for that case; the OSS build settles only tasks
+//     dispatched to runners, through runnerTasksReconcileLoop's offline timeout.
+//
+// Closing either one needs something this schema does not have — an owner or a
+// lease per task, so that a pass can tell "nobody is working on this" from "not
+// me" — rather than a different flag to branch on.
 func (p *TaskPool) recoverInterruptedTasks() {
 	if util.HAEnabled() {
 		return
 	}
 
-	tasks, total, err := p.store.GetUnfinishedTasks(maxTasksToRecover)
+	tasks, total, err := p.store.GetUnfinishedTasks(recoverableTaskStatuses(), maxTasksToRecover)
 	if err != nil {
 		log.WithError(err).WithFields(log.Fields{
 			"context": "task_recovery",
@@ -78,29 +96,18 @@ func (p *TaskPool) recoverInterruptedTasks() {
 		return
 	}
 
-	selected := len(tasks)
-
-	recoverable := tasks[:0]
-	for _, task := range tasks {
-		if recoverableTaskStatuses[task.Status] {
-			recoverable = append(recoverable, task)
-		}
-	}
-	tasks = recoverable
-
 	log.WithFields(log.Fields{
-		"count":      len(tasks),
-		"unfinished": total,
-		"examined":   selected,
-		"context":    "task_recovery",
+		"count":       len(tasks),
+		"recoverable": total,
+		"context":     "task_recovery",
 	}).Info("recovering tasks interrupted by a server restart")
 
-	if selected < total {
+	if len(tasks) < total {
 		log.WithFields(log.Fields{
-			"examined":   selected,
-			"unfinished": total,
-			"context":    "task_recovery",
-		}).Warn("more unfinished tasks than one recovery pass handles; the rest are left for the next restart")
+			"examined":    len(tasks),
+			"recoverable": total,
+			"context":     "task_recovery",
+		}).Warn("more interrupted tasks than one recovery pass handles; the rest are left for the next restart")
 	}
 
 	for _, task := range tasks {

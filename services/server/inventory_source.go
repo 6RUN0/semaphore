@@ -68,9 +68,10 @@ type inventorySourceLocator struct {
 
 	// checkoutLock serializes work inside a checkout directory. The directory
 	// is shared by every inventory of the same repository and branch, and read
-	// on an unauthenticated GET path, so without this two requests run
-	// `git pull` in the same tree at once — or one parses it while the other
-	// is half way through updating it. The tasks' repoLock guards the tasks'
+	// on a plain GET that any project member may issue — authenticated, but
+	// needing no particular permission and trivially concurrent. Without this,
+	// two requests run `git pull` in the same tree at once, or one parses it
+	// while the other is half way through updating it. The tasks' repoLock guards the tasks'
 	// own directories; these are different directories with the same hazard.
 	//
 	// It is a pointer for the same reason repoLock is one in TaskPool and
@@ -84,6 +85,11 @@ type inventorySourceLocator struct {
 	// comparison against the stored snapshot.
 	remoteHeadsMu sync.Mutex
 	remoteHeads   map[string]remoteHeadEntry
+
+	// remoteHeadFetchLock collapses concurrent misses on one key into a single
+	// `git ls-remote`, see remoteHead. A pointer for the same reason
+	// checkoutLock is one.
+	remoteHeadFetchLock *keylock.KeyLock
 }
 
 func (l *inventorySourceLocator) client() db_lib.GitClient {
@@ -236,12 +242,26 @@ func (l *inventorySourceLocator) remoteHead(repository db.Repository, fresh bool
 	key := fmt.Sprintf("%d\n%s\n%s", repository.ID, repository.GitURL, repository.GitBranch)
 
 	if !fresh {
-		l.remoteHeadsMu.Lock()
-		entry, ok := l.remoteHeads[key]
-		l.remoteHeadsMu.Unlock()
+		if head, ok := l.cachedRemoteHead(key); ok {
+			return head, nil
+		}
+	}
 
-		if ok && time.Now().Before(entry.expires) {
-			return entry.head, nil
+	// Reading the cache and filling it are two steps, and between them sits a
+	// network round trip: with a cold or just-expired entry every concurrent
+	// reader misses and spawns a `git ls-remote` of its own. The picker's
+	// search box fires a read per keystroke, so that is one process per
+	// keystroke per open picker, each holding an HTTP goroutine for as long as
+	// an unreachable remote takes to time out.
+	//
+	// Serialising on the key and looking again inside collapses them into one
+	// fetch: the first caller fills the cache, the rest read what it left.
+	unlock := l.remoteHeadFetchLock.Lock(key)
+	defer unlock()
+
+	if !fresh {
+		if head, ok := l.cachedRemoteHead(key); ok {
+			return head, nil
 		}
 	}
 
@@ -260,15 +280,41 @@ func (l *inventorySourceLocator) remoteHead(repository db.Repository, fresh bool
 	return hash, nil
 }
 
+// cachedRemoteHead answers from the cache while the entry is fresh, and drops
+// it when it is not: the key carries the branch name, so renaming a branch or
+// re-pointing a repository leaves an entry nothing will ever read again.
+func (l *inventorySourceLocator) cachedRemoteHead(key string) (string, bool) {
+	l.remoteHeadsMu.Lock()
+	defer l.remoteHeadsMu.Unlock()
+
+	entry, ok := l.remoteHeads[key]
+	if !ok {
+		return "", false
+	}
+
+	if time.Now().Before(entry.expires) {
+		return entry.head, true
+	}
+
+	delete(l.remoteHeads, key)
+
+	return "", false
+}
+
 // lock serializes everything done with one checkout directory and returns the
-// unlock function. An inline inventory lives in the database and shares no
-// directory with anybody, so it needs no lock.
+// unlock function.
+//
+// An inline inventory shares no directory with anybody, but its readers still
+// share the snapshot rows they are about to replace, so it is serialized on the
+// inventory itself: without that, every concurrent reader of a stale snapshot
+// parses and rewrites four tables with the rows the first one already wrote.
 //
 // The lock is taken by the caller rather than by read below, because the
 // decision to rebuild at all has to be made under it: see ensureFresh.
-func (l *inventorySourceLocator) lock(source inventorySource) func() {
+func (l *inventorySourceLocator) lock(inventory db.Inventory, source inventorySource) func() {
 	if source.isInline() {
-		return func() {}
+		return l.checkoutLock.Lock(
+			fmt.Sprintf("inventory_%d_%d", inventory.ProjectID, inventory.ID))
 	}
 
 	return l.checkoutLock.Lock(l.gitRepository(*source.repository).TmpDirName)

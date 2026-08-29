@@ -140,6 +140,18 @@ func (c *InventorySnapshotController) dispatchInventoryResolve(
 		return
 	}
 
+	// Asked before anything is reported about the template: whether it may be
+	// run is the caller's own permission, and the answers below describe the
+	// template itself.
+	if !c.canRunTemplate(r, inventory.ProjectID, *templateID) {
+		// The body matches every other error of this endpoint. The status is
+		// what a caller keys on, and it is unchanged.
+		helpers.WriteErrorStatus(w,
+			"Listing the hosts of this inventory runs a task, which you are not allowed to do.",
+			http.StatusForbidden)
+		return
+	}
+
 	// The resolve flag is only understood by the Ansible executor. Any other
 	// app would ignore it and run the template for real — a host list refresh
 	// must never be able to do that, permissions or not.
@@ -165,15 +177,6 @@ func (c *InventorySnapshotController) dispatchInventoryResolve(
 		helpers.WriteErrorStatus(w,
 			"This template does not allow its inventory to be overridden, so it can not list the hosts of another one.",
 			http.StatusBadRequest)
-		return
-	}
-
-	if !c.canRunTemplate(r, inventory.ProjectID, *templateID) {
-		// The body matches every other error of this endpoint. The status is
-		// what a caller keys on, and it is unchanged.
-		helpers.WriteErrorStatus(w,
-			"Listing the hosts of this inventory runs a task, which you are not allowed to do.",
-			http.StatusForbidden)
 		return
 	}
 

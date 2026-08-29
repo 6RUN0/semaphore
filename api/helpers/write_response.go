@@ -56,8 +56,13 @@ func WriteError(w http.ResponseWriter, err error) {
 	case errors.As(err, &validationError):
 		WriteErrorStatus(w, validationError.Error(), http.StatusBadRequest)
 	default:
+		// Anything that reaches here is a failure of the server, not of the
+		// request: a database that went away, a git remote that timed out, a
+		// bug. Reporting those as 400 tells the client to fix its input and not
+		// to retry, which is the opposite of what it should do — and the body
+		// is empty, so it has nothing to go on either.
 		log.Error(err)
 		debug.PrintStack()
-		w.WriteHeader(http.StatusBadRequest)
+		WriteErrorStatus(w, "Internal server error", http.StatusInternalServerError)
 	}
 }

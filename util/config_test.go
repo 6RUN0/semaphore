@@ -12,6 +12,7 @@ import (
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"gopkg.in/yaml.v3"
 )
 
 func mockError(msg string) {
@@ -653,7 +654,7 @@ func TestValidateTargetHostVar(t *testing.T) {
 	// Every reserved name must be rejected, not just the two the table above
 	// spells out: the list is the whole point of the check, and a name silently
 	// dropped from it fails only in production, inside a playbook.
-	for name := range reservedTargetHostVarNames {
+	for name := range reservedTargetHostVarNames() {
 		tests = append(tests, struct {
 			name      string
 			value     string
@@ -852,4 +853,38 @@ func TestAssignMapToStruct_NestedError(t *testing.T) {
 
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "Items")
+}
+
+// config.schema.yaml is the contract an editor and a CI configuration check
+// read. A name it accepts and validateTargetHostVar then rejects turns a
+// configuration mistake into a server that will not start.
+func TestConfigSchemaListsTheSameReservedNames(t *testing.T) {
+	content, err := os.ReadFile(filepath.Join("..", "config.schema.yaml"))
+	require.NoError(t, err)
+
+	var schema struct {
+		Properties struct {
+			TargetHostVar struct {
+				AllOf []struct {
+					Not struct {
+						Enum []string `yaml:"enum"`
+					} `yaml:"not"`
+				} `yaml:"allOf"`
+			} `yaml:"target_host_var"`
+		} `yaml:"properties"`
+	}
+
+	require.NoError(t, yaml.Unmarshal(content, &schema))
+
+	inSchema := []string{}
+	for _, clause := range schema.Properties.TargetHostVar.AllOf {
+		inSchema = append(inSchema, clause.Not.Enum...)
+	}
+
+	reserved := make([]string, 0, len(reservedTargetHostVarNames()))
+	for name := range reservedTargetHostVarNames() {
+		reserved = append(reserved, name)
+	}
+
+	assert.ElementsMatch(t, reserved, inSchema)
 }

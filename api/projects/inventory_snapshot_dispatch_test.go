@@ -11,6 +11,7 @@ import (
 	"github.com/semaphoreui/semaphore/db"
 	"github.com/semaphoreui/semaphore/db/sql"
 	"github.com/semaphoreui/semaphore/services/server"
+	"github.com/semaphoreui/semaphore/services/tasks"
 	"github.com/semaphoreui/semaphore/util"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -404,7 +405,7 @@ func TestRefreshDispatch_AcceptsAnotherInventoryWhenOverrideIsAllowed(t *testing
 
 // Every other error of this endpoint carries a JSON body with an "error" field;
 // a bare status here left the one refusal a caller is most likely to hit as the
-// odd one out (review finding m-10).
+// odd one out.
 func TestRefreshDispatch_ForbiddenCarriesAnErrorBody(t *testing.T) {
 	store, inventory, template, user := newDispatchFixture(t, db.ProjectGuest)
 
@@ -428,4 +429,57 @@ func TestRefreshDispatch_ForbiddenCarriesAnErrorBody(t *testing.T) {
 	}
 	require.NoError(t, json.Unmarshal(w.Body.Bytes(), &body))
 	assert.NotEmpty(t, body.Error)
+}
+
+// failingTemplateStore breaks AddTask the way a template deleted between the
+// dispatcher's own lookup and the pool's does.
+type failingTemplateStore struct {
+	db.Store
+}
+
+func (s *failingTemplateStore) GetTemplate(int, int) (db.Template, error) {
+	return db.Template{}, db.ErrNotFound
+}
+
+// The claim is taken before the task exists, so a task that never gets queued
+// leaves it held: the inventory would then show "resolving" until the claim
+// expires half an hour later, with nothing running behind it.
+func TestRefreshDispatch_ReleasesTheClaimWhenQueueingFails(t *testing.T) {
+	store, inventory, template, user := newDispatchFixture(t, db.ProjectOwner)
+
+	svc := &mockInventorySnapshotService{
+		refreshErr: server.InventoryNeedsRunnerError{InventoryID: inventory.ID},
+	}
+	ctrl := NewInventorySnapshotController(svc)
+
+	// The pool reads templates through its own store, which is the one that
+	// fails here; the controller keeps the working store for the claim.
+	pool := tasks.CreateTaskPool(
+		&failingTemplateStore{Store: store},
+		tasks.NewMemoryTaskStateStore(),
+		nil, nil, nil, nil, nil, nil, nil,
+	)
+
+	req, w := newDispatchRequest(
+		"/snapshot/refresh?template_id="+strconv.Itoa(template.ID),
+		inventory,
+		user,
+		db.CanManageProjectResources|db.CanRunProjectTasks,
+		store,
+	)
+	req = helpers.SetContextValue(req, "task_pool", &pool)
+
+	ctrl.RefreshInventorySnapshot(w, req)
+
+	assert.Equal(t, http.StatusNotFound, w.Code)
+
+	queued, err := store.GetProjectTasks(inventory.ProjectID, db.RetrieveQueryParams{})
+	require.NoError(t, err)
+	assert.Empty(t, queued)
+
+	snapshot, err := store.GetInventorySnapshot(inventory.ProjectID, inventory.ID)
+	require.NoError(t, err)
+	assert.Equal(t, db.InventorySnapshotStatusError, snapshot.Status,
+		"a claim whose task was never queued must not be left pending")
+	assert.Contains(t, snapshot.Error, "queue")
 }

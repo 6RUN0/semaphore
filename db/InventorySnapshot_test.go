@@ -2,7 +2,9 @@ package db
 
 import (
 	"encoding/json"
+	"strings"
 	"testing"
+	"unicode/utf8"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -10,7 +12,7 @@ import (
 
 // The groups arrive as a map, whose iteration order is random. This content is
 // serialized into a runner's progress report, so without an order of its own
-// two reports of the same inventory differ on the wire (review finding m4).
+// two reports of the same inventory differ on the wire.
 func TestNewInventorySnapshotContentOrdersGroupsByName(t *testing.T) {
 	groups := map[string][]string{
 		"web":  {"web01"},
@@ -43,8 +45,7 @@ func TestNewInventorySnapshotContentNeverHoldsNilSlices(t *testing.T) {
 
 // This struct is the body a runner reports a resolved host list in, so its
 // field names are a wire contract with every deployed runner. Renaming a field
-// without keeping its tag would break that silently, in one direction only
-// (review finding m5).
+// without keeping its tag would break that silently, in one direction only.
 func TestInventorySnapshotContentPinsItsWireNames(t *testing.T) {
 	encoded, err := json.Marshal(InventorySnapshotContent{
 		Hosts:  []string{"web01"},
@@ -63,4 +64,18 @@ func TestInventorySnapshotContentPinsItsWireNames(t *testing.T) {
 	require.Len(t, decoded.Groups, 1)
 	assert.Equal(t, "web", decoded.Groups[0].Name)
 	assert.Equal(t, []string{"web01"}, decoded.Groups[0].Hosts)
+}
+
+// A byte cut can split a multi-byte character and PostgreSQL rejects the
+// resulting invalid UTF-8, turning a long error message into a failed write.
+func TestTruncateSnapshotErrorKeepsValidUTF8(t *testing.T) {
+	long := strings.Repeat("ы", MaxInventorySnapshotErrorLength+10)
+
+	truncated := TruncateSnapshotError(long)
+
+	assert.True(t, utf8.ValidString(truncated))
+	assert.Equal(t, MaxInventorySnapshotErrorLength, utf8.RuneCountInString(truncated))
+
+	short := "short"
+	assert.Equal(t, short, TruncateSnapshotError(short))
 }

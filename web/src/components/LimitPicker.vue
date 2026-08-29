@@ -78,7 +78,9 @@
               v-for="group in groups"
               :key="group.name"
               @click="filterByGroup(group.name)"
+              @keydown.space.prevent="toggle(group.name)"
               :input-value="activeGroup === group.name"
+              :title="$t('groupRowHint')"
             >
               <v-list-item-action class="limit-picker__check" @click.stop>
                 <v-simple-checkbox
@@ -103,6 +105,10 @@
               </v-list-item-content>
             </v-list-item>
           </v-list>
+
+          <div v-if="groupPageIsFull" class="caption text--secondary px-3 pb-2">
+            {{ $t('groupListTruncated', { count: groups.length }) }}
+          </div>
         </v-col>
 
         <v-divider vertical />
@@ -207,10 +213,21 @@ import axios from 'axios';
 // paged on the server, so every change of the query is a round trip.
 const searchDebounce = 250;
 
-// resolvePollInterval is how often a pending resolve is asked about. The
+// resolvePollInterval is how soon a pending resolve is asked about first. The
 // server answers a pending read from the stored row without touching git, so
 // the poll is cheap; the resolve itself usually takes a few seconds.
 const resolvePollInterval = 3000;
+
+// resolvePollMaxInterval and resolvePollBackoff stretch the gap between polls.
+// A resolve whose task no runner picks up stays pending until the server
+// expires the claim, and at a fixed three seconds an open tab would ask about
+// it some six hundred times — multiplied by every open tab.
+const resolvePollMaxInterval = 30000;
+const resolvePollBackoff = 1.5;
+
+// resolvePollGiveUp matches db.MaxInventoryResolveAge: past it the server
+// settles the claim itself, so there is nothing left for polling to see.
+const resolvePollGiveUp = 30 * 60 * 1000;
 
 export default {
   props: {
@@ -235,6 +252,8 @@ export default {
       error: null,
       searchTimeout: null,
       pollTimeout: null,
+      pollInterval: resolvePollInterval,
+      pollDeadline: null,
       // hostsRequest numbers the host requests in flight so that a slow older
       // response can be told from the current one and dropped.
       hostsRequest: 0,
@@ -268,6 +287,13 @@ export default {
     // the user can trust and one that quietly hides a host.
     pageIsFull() {
       return this.hosts.length >= this.pageSize;
+    },
+
+    // The group list is capped by the server the same way the host list is, but
+    // it has no search to narrow it with, so saying it was cut is the only
+    // signal a user gets that a group they cannot see exists.
+    groupPageIsFull() {
+      return this.groups.length >= this.pageSize;
     },
 
     pageSize() {
@@ -373,14 +399,20 @@ export default {
           return;
         }
 
-        this.groups = (await axios({
-          method: 'get',
-          url: this.snapshotUrl('/groups'),
-          params: this.snapshotParams(),
-          responseType: 'json',
-        })).data;
+        // Both lists come from the same snapshot, and each request repeats the
+        // server's freshness check (which for a file inventory reaches git),
+        // so they are asked for together rather than one after the other.
+        const [groups] = await Promise.all([
+          axios({
+            method: 'get',
+            url: this.snapshotUrl('/groups'),
+            params: this.snapshotParams({ limit: this.pageSize }),
+            responseType: 'json',
+          }),
+          this.loadHosts(),
+        ]);
 
-        await this.loadHosts();
+        this.groups = groups.data;
       } catch (err) {
         this.error = err.response?.data?.error || err.message;
       } finally {
@@ -431,7 +463,23 @@ export default {
 
     schedulePoll() {
       clearTimeout(this.pollTimeout);
-      this.pollTimeout = setTimeout(() => this.load(), resolvePollInterval);
+
+      const now = Date.now();
+
+      if (this.pollDeadline == null) {
+        this.pollDeadline = now + resolvePollGiveUp;
+      }
+
+      if (now >= this.pollDeadline) {
+        this.error = this.$t('hostListResolveTimedOut');
+        return;
+      }
+
+      this.pollTimeout = setTimeout(() => this.load(), this.pollInterval);
+      this.pollInterval = Math.min(
+        Math.round(this.pollInterval * resolvePollBackoff),
+        resolvePollMaxInterval,
+      );
     },
 
     async refresh() {
@@ -441,6 +489,11 @@ export default {
 
       this.refreshing = true;
       this.error = null;
+
+      // A refresh is a new resolve, so the backoff of the previous one starts
+      // over rather than carrying its stretched interval into this wait.
+      this.pollInterval = resolvePollInterval;
+      this.pollDeadline = null;
 
       try {
         // 200 carries the rebuilt snapshot; 202 means a resolve task was
@@ -461,7 +514,12 @@ export default {
           await this.load();
         }
       } catch (err) {
-        if (err.response?.status === 403) {
+        // 403 comes from two places: the dispatcher, which explains that
+        // running a listing needs the permission to run tasks, and the project
+        // middleware, which sends an empty body for a missing permission to
+        // manage resources. Naming the first reason for the second case tells a
+        // user they lack a permission they do have.
+        if (err.response?.status === 403 && !err.response?.data?.error) {
           this.error = this.$t('refreshHostListForbidden');
         } else {
           this.error = err.response?.data?.error || err.message;

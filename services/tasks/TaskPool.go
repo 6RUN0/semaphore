@@ -111,6 +111,12 @@ type TaskPool struct {
 	// be called after Run.
 	reconcileDone chan struct{}
 
+	// recoveryDone is closed when the recovery goroutine exits — which is later
+	// than recovered, since it still has the queue to wake afterwards. Stop
+	// waits on it so that a test may restore util.Config as soon as Stop
+	// returns: rehydrating a dispatched task reads that config.
+	recoveryDone chan struct{}
+
 	// recovered is closed once recoverInterruptedTasks has finished. It is the
 	// barrier that lets recovery run off the queue's own goroutine: until it is
 	// closed, handleQueue accepts and enqueues events but starts nothing, so no
@@ -154,6 +160,7 @@ func CreateTaskPool(
 		repoLock:               &keylock.KeyLock{},
 		stop:                   make(chan struct{}),
 		reconcileDone:          make(chan struct{}),
+		recoveryDone:           make(chan struct{}),
 		recovered:              make(chan struct{}),
 	}
 	// attempt to start HA state store (no-op for memory)
@@ -262,8 +269,18 @@ func (p *TaskPool) Run() {
 	// throughout, but no task is scheduled until the pool's picture of what is
 	// already running is complete.
 	go func() {
-		defer close(p.recovered)
+		// recoveryDone lets Stop block until this goroutine is done reading
+		// shared state (populateDetails reads util.Config), for the same reason
+		// reconcileDone exists below.
+		defer close(p.recoveryDone)
+
 		p.recoverInterruptedTasks()
+
+		// Closed before the wake-up, not after: handleQueue reacts to the event
+		// by checking the barrier, so closing it afterwards lets the very event
+		// meant to start the queue arrive while the barrier is still shut — and
+		// the task then waits for the next five-second tick after all.
+		close(p.recovered)
 
 		// Wake the queue so a task that arrived during recovery starts now
 		// rather than on the next five-second tick.
@@ -308,7 +325,9 @@ func (p *TaskPool) Run() {
 }
 
 // Stop signals Run's background loops to exit and blocks until the runner-task
-// reconcile loop has finished. It must be called at most once, and only after
+// reconcile loop and restart recovery have finished. Recovery is waited for as
+// well because it rehydrates task runners, which read util.Config — the very
+// thing a test restores right after Stop returns. It must be called at most once, and only after
 // Run has been started (it waits on reconcileDone, which only the reconcile
 // loop closes). Production runs the pool for the whole process lifetime and
 // never calls Stop; it exists so tests can terminate the reconcile goroutine
@@ -316,6 +335,7 @@ func (p *TaskPool) Run() {
 func (p *TaskPool) Stop() {
 	close(p.stop)
 	<-p.reconcileDone
+	<-p.recoveryDone
 }
 
 func getTaskName(t *TaskRunner) string {
@@ -1110,9 +1130,6 @@ func (p *TaskPool) AddTask(
 	taskObj.Status = task_logger.TaskWaitingStatus
 	taskObj.UserID = userID
 	taskObj.ProjectID = projectID
-	extraSecretVars := taskObj.Secret
-	taskObj.Secret = ""
-
 	tpl, err := p.store.GetTemplate(projectID, taskObj.TemplateID)
 	if err != nil {
 		return
@@ -1122,6 +1139,12 @@ func (p *TaskPool) AddTask(
 	if err != nil {
 		return
 	}
+
+	// Read off the task only after it has been validated: the secret is a map
+	// of extra vars from the request body like the environment beside it, and
+	// clearing the field first would hand it to the executor unchecked.
+	extraSecretVars := taskObj.Secret
+	taskObj.Secret = ""
 
 	// A task-supplied commit hash redirects the checkout away from the
 	// template's pinned branch, so it is honored only when the template allows

@@ -6,6 +6,8 @@ import (
 	"testing"
 	"time"
 
+	"github.com/go-sql-driver/mysql"
+	"github.com/lib/pq"
 	"github.com/semaphoreui/semaphore/db"
 	"github.com/semaphoreui/semaphore/pkg/tz"
 	"github.com/semaphoreui/semaphore/util"
@@ -17,6 +19,12 @@ import (
 // migration applied, which is what exercises the snapshot schema itself.
 func newSnapshotTestStore(t *testing.T) *SqlDb {
 	t.Helper()
+
+	// util.Config is package state shared by every test in this package, and a
+	// helper that leaves its own value behind makes whatever runs next depend on
+	// the order tests happen to run in.
+	previous := util.Config
+	t.Cleanup(func() { util.Config = previous })
 
 	util.Config = &util.ConfigType{
 		SQLite: &util.DbConfig{
@@ -713,7 +721,13 @@ func TestSetResolvedInventorySnapshot(t *testing.T) {
 // Two writers replacing the same inventory's snapshot at once — two nodes in
 // HA, or two requests on one — must both come back clean: the database answers
 // the collision with a deadlock or duplicate key, and the store retries
-// because every writer derives the same rows (review finding M4).
+// because every writer derives the same rows.
+//
+// What this proves here is that the write path is safe to call from several
+// goroutines, not that the retry loop works: the SQLite pool holds a single
+// connection, so these writes serialise in the driver and no conflict is ever
+// raised. The retry loop itself is covered by assertConcurrentWritesConverge in
+// the dialect run, against engines that really do collide.
 func TestConcurrentSetInventorySnapshot(t *testing.T) {
 	store := newSnapshotTestStore(t)
 	inventory := newSnapshotTestInventory(t, store)
@@ -776,7 +790,7 @@ func TestIsSnapshotWriteConflict(t *testing.T) {
 // The write path must refuse a caller pairing one project with another's
 // inventory before anything is deleted: the deletes go by inventory id alone,
 // so without the guard the victim's snapshot would be wiped and rewritten
-// under the caller's project (review finding L-1).
+// under the caller's project.
 func TestSetInventorySnapshotRefusesAForeignPair(t *testing.T) {
 	store := newSnapshotTestStore(t)
 	inventory := newSnapshotTestInventory(t, store)
@@ -806,7 +820,7 @@ func TestSetInventorySnapshotRefusesAForeignPair(t *testing.T) {
 // A host name folds by whatever rules the engine has, and the pattern has to
 // fold by the same ones. Lowering the pattern in Go instead folded it by
 // Unicode while SQLite's lower() folds only ASCII, so "ÄB" became "äb" and
-// stopped matching "ÄB01" (review finding m-3).
+// stopped matching "ÄB01".
 func TestInventorySnapshotHostsSearchHandlesNonASCII(t *testing.T) {
 	store := newSnapshotTestStore(t)
 	inventory := newSnapshotTestInventory(t, store)
@@ -844,7 +858,7 @@ func TestInventorySnapshotHostsSearchHandlesNonASCII(t *testing.T) {
 }
 
 // Groups are capped as high as hosts are, and the reason hosts are served a
-// page at a time applies to them unchanged (review finding m-6).
+// page at a time applies to them unchanged.
 func TestInventorySnapshotGroupsArePaged(t *testing.T) {
 	store := newSnapshotTestStore(t)
 	inventory := newSnapshotTestInventory(t, store)
@@ -890,4 +904,39 @@ func TestInventorySnapshotGroupsArePaged(t *testing.T) {
 		require.NoError(t, err)
 		assert.Len(t, page, db.MaxInventoryGroupPageSize)
 	})
+}
+
+// MySQL renders its error messages in the server's lc_messages, so a classifier
+// reading them by substring answers "not a conflict" on any installation not
+// running an English locale, which switches the retry loop off exactly where it
+// is needed. The numeric codes do not move.
+func TestIsSnapshotWriteConflictReadsDriverCodes(t *testing.T) {
+	tests := []struct {
+		name     string
+		err      error
+		conflict bool
+	}{
+		{"mysql deadlock in another language", &mysql.MySQLError{Number: 1213, Message: "Взаимоблокировка"}, true},
+		{"mysql duplicate entry", &mysql.MySQLError{Number: 1062, Message: "Duplicate entry"}, true},
+		{"mysql lock wait timeout", &mysql.MySQLError{Number: 1205, Message: "Lock wait timeout exceeded"}, true},
+		// Observed on MariaDB 12.3 in the dialect run, where MySQL and MariaDB
+		// 10.11 report the same collision as a deadlock. Left out, eight
+		// concurrent writers of one snapshot produce failed writes rather than
+		// retries.
+		{"mariadb record changed", &mysql.MySQLError{
+			Number:  1020,
+			Message: "Record has changed since last read in table 'project__inventory_snapshot_host_group'",
+		}, true},
+		{"mysql unrelated failure", &mysql.MySQLError{Number: 1114, Message: "The table is full"}, false},
+		{"postgres deadlock", &pq.Error{Code: "40P01"}, true},
+		{"postgres unique violation", &pq.Error{Code: "23505"}, true},
+		{"postgres foreign key violation", &pq.Error{Code: "23503"}, false},
+		{"wrapped mysql deadlock", fmt.Errorf("saving the snapshot: %w", &mysql.MySQLError{Number: 1213}), true},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			assert.Equal(t, tt.conflict, isSnapshotWriteConflict(tt.err))
+		})
+	}
 }

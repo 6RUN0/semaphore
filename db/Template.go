@@ -388,7 +388,7 @@ func (tpl *Template) Validate() error {
 	// an unknown app becomes a ShellApp that executes string(App) as a system binary
 	// (arbitrary command execution). util.Config is nil in some unit tests; an empty
 	// app is the legacy default and runs no command, so both are skipped.
-	if tpl.App != "" {
+	if tpl.App != "" && util.Config != nil {
 		if _, ok := util.Config.Apps[string(tpl.App)]; !ok {
 			return common_errors.NewValidationError("invalid app: " + string(tpl.App))
 		}
@@ -401,13 +401,17 @@ func (tpl *Template) Validate() error {
 		}
 
 		// The template's limit ends up in the same rendered extra variable as
-		// the task's, so it needs the same check. A malformed params map is not
-		// this validator's business — it is reported where the params are read.
+		// the task's, so it needs the same check. Params that do not parse are
+		// rejected here rather than passed over: this is the only place a
+		// template's limit is ever checked, so skipping the check on a
+		// malformed map would let a limit through unvalidated.
 		var params AnsibleTemplateParams
-		if tpl.FillParams(&params) == nil {
-			if err := ValidateAnsibleLimit(params.Limit, "template"); err != nil {
-				return err
-			}
+		if err := tpl.FillParams(&params); err != nil {
+			return common_errors.NewValidationError("template params are not valid: " + err.Error())
+		}
+
+		if err := ValidateAnsibleLimit(params.Limit, "template"); err != nil {
+			return err
 		}
 	}
 

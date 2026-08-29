@@ -66,7 +66,7 @@ func (t *AnsibleApp) Run(args LocalAppRunningArgs) error {
 	cliArgs := args.CliArgs["default"]
 
 	if params, ok := args.TaskParams.(*db.AnsibleTaskParams); ok && params != nil && params.ResolveInventoryOnly {
-		return t.resolveInventory(cliArgs, args.EnvironmentVars)
+		return t.resolveInventory(cliArgs, args.EnvironmentVars, args.Callback)
 	}
 
 	return t.Playbook.RunPlaybook(cliArgs, args.EnvironmentVars, args.Inputs, args.Callback)
@@ -76,10 +76,13 @@ func (t *AnsibleApp) Run(args LocalAppRunningArgs) error {
 // and reports the names it found. It is the only way the hosts of a dynamic
 // inventory are ever learned: listing them runs a program from the repository,
 // which is a runner's job and never the server's.
-func (t *AnsibleApp) resolveInventory(args []string, environmentVars []string) error {
+//
+// cb is threaded through so that a listing is stoppable: it is the callback
+// that hands the executor the process its Kill() acts on.
+func (t *AnsibleApp) resolveInventory(args []string, environmentVars []string, cb func(*os.Process)) error {
 	t.Log("Resolving the inventory host list.\n")
 
-	output, err := t.Playbook.RunInventoryListing(args, environmentVars)
+	output, err := t.Playbook.RunInventoryListing(args, environmentVars, cb)
 	if err != nil {
 		return err
 	}

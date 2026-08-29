@@ -56,8 +56,7 @@ func newUnfinishedTasksFixture(t *testing.T, store *SqlDb) func(task_logger.Task
 
 // GetUnfinishedTasks reads the largest table in the database at every start.
 // These pin what it selects and that the cap is honoured, so a long-neglected
-// installation cannot turn a restart into a full-table materialization
-// (review finding M6).
+// installation cannot turn a restart into a full-table materialization.
 func TestGetUnfinishedTasks(t *testing.T) {
 	store := newSnapshotTestStore(t)
 	newTask := newUnfinishedTasksFixture(t, store)
@@ -76,7 +75,7 @@ func TestGetUnfinishedTasks(t *testing.T) {
 		newTask(status)
 	}
 
-	tasks, total, err := store.GetUnfinishedTasks(100)
+	tasks, total, err := store.GetUnfinishedTasks(task_logger.UnfinishedTaskStatuses(), 100)
 	require.NoError(t, err)
 
 	assert.Equal(t, len(unfinished), total)
@@ -95,7 +94,7 @@ func TestGetUnfinishedTasksHonoursTheLimit(t *testing.T) {
 		created = append(created, newTask(task_logger.TaskRunningStatus).ID)
 	}
 
-	tasks, total, err := store.GetUnfinishedTasks(2)
+	tasks, total, err := store.GetUnfinishedTasks([]task_logger.TaskStatus{task_logger.TaskRunningStatus}, 2)
 	require.NoError(t, err)
 
 	// total is what lets the caller report how much it left behind.
@@ -112,8 +111,47 @@ func TestGetUnfinishedTasksWithNothingToRecover(t *testing.T) {
 	store := newSnapshotTestStore(t)
 	newUnfinishedTasksFixture(t, store)
 
-	tasks, total, err := store.GetUnfinishedTasks(100)
+	tasks, total, err := store.GetUnfinishedTasks(task_logger.UnfinishedTaskStatuses(), 100)
 
+	require.NoError(t, err)
+	assert.Empty(t, tasks)
+	assert.Equal(t, 0, total)
+}
+
+// The status filter belongs in the query, not in the caller: the limit has to
+// bound the rows the caller acts on. Queued and rejected rows are never settled
+// by anything, so they pile up over an installation's lifetime and hold the
+// lowest ids — selected together with the running ones, they would fill the
+// whole page and leave recovery with nothing to do, permanently.
+func TestGetUnfinishedTasksLimitsWithinTheRequestedStatuses(t *testing.T) {
+	store := newSnapshotTestStore(t)
+	newTask := newUnfinishedTasksFixture(t, store)
+
+	for i := 0; i < 5; i++ {
+		newTask(task_logger.TaskRejected)
+	}
+
+	running := newTask(task_logger.TaskRunningStatus).ID
+
+	tasks, total, err := store.GetUnfinishedTasks([]task_logger.TaskStatus{task_logger.TaskRunningStatus}, 2)
+
+	require.NoError(t, err)
+	require.Len(t, tasks, 1)
+	assert.Equal(t, running, tasks[0].ID)
+	assert.Equal(t, 1, total)
+}
+
+func TestGetUnfinishedTasksWithNoStatusesOrNoRoom(t *testing.T) {
+	store := newSnapshotTestStore(t)
+	newTask := newUnfinishedTasksFixture(t, store)
+	newTask(task_logger.TaskRunningStatus)
+
+	tasks, total, err := store.GetUnfinishedTasks(nil, 100)
+	require.NoError(t, err)
+	assert.Empty(t, tasks)
+	assert.Equal(t, 0, total)
+
+	tasks, total, err = store.GetUnfinishedTasks(task_logger.UnfinishedTaskStatuses(), 0)
 	require.NoError(t, err)
 	assert.Empty(t, tasks)
 	assert.Equal(t, 0, total)

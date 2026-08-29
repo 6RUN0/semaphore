@@ -4,6 +4,7 @@ import (
 	"testing"
 
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 // IsInventoryResolve is asked on every status change and on both sides of the
@@ -47,4 +48,36 @@ func TestInventoryResolveFlagMatchesAnsibleTaskParams(t *testing.T) {
 	assert.NoError(t, task.ExtractParams(&params))
 	assert.True(t, params.ResolveInventoryOnly)
 	assert.Equal(t, params.ResolveInventoryOnly, task.IsInventoryResolve())
+}
+
+// The deprecated top-level "limit" field is bound from the request body just
+// like params.limit, but the hook that moves it into Params runs inside
+// CreateTask — after ValidateNewTask returned. A limit sent in that field used
+// to reach --limit and the extra vars with no validation at all.
+func TestValidateNewTaskChecksTheDeprecatedLimitField(t *testing.T) {
+	task := Task{Limit: "{{ lookup('pipe', 'id') }}"}
+
+	err := task.ValidateNewTask(Template{App: AppAnsible})
+
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "must not contain")
+}
+
+func TestValidateNewTaskNormalizesTheDeprecatedLimitField(t *testing.T) {
+	task := Task{Limit: "web, db"}
+
+	require.NoError(t, task.ValidateNewTask(Template{App: AppAnsible}))
+	assert.Equal(t, []string{"web", "db"}, task.Params["limit"])
+}
+
+// Params is the current spelling, so a task carrying both keeps it.
+func TestNormalizeDeprecatedLimitKeepsAnExistingParam(t *testing.T) {
+	task := Task{
+		Limit:  "web",
+		Params: MapStringAnyField{"limit": []string{"db"}},
+	}
+
+	task.NormalizeDeprecatedLimit()
+
+	assert.Equal(t, []string{"db"}, task.Params["limit"])
 }

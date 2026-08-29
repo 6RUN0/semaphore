@@ -230,7 +230,7 @@ func TestGetTerraformArgs_MultiSelect(t *testing.T) {
 
 // Defense in depth behind the dispatcher's own app check: the resolve flag is
 // only understood by the Ansible branch of Prepare, and any other app would
-// silently ignore it and run the template for real (review finding C4).
+// silently ignore it and run the template for real.
 func TestPrepareRefusesResolveOnNonAnsibleTemplate(t *testing.T) {
 	executor := &LocalExecutor{
 		Task: db.Task{
@@ -262,7 +262,7 @@ func newInventoryListingExecutor(vaults map[string]ssh.AccessKeyInstallation) *L
 // An inventory file, or the group_vars beside it, may be encrypted with
 // ansible-vault. getPlaybookArgs passes the vault ids; a listing has to pass
 // them too, or ansible-inventory fails with a raw "Attempting to decrypt but no
-// vault secrets found" (review finding M3).
+// vault secrets found".
 func TestGetInventoryArgsPassesVaultScripts(t *testing.T) {
 	executor := newInventoryListingExecutor(map[string]ssh.AccessKeyInstallation{
 		"default": {Script: "/tmp/vault-default.sh"},

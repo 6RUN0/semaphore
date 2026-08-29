@@ -14,6 +14,7 @@ import (
 	"github.com/semaphoreui/semaphore/db/sql"
 	"github.com/semaphoreui/semaphore/pkg/task_logger"
 	"github.com/semaphoreui/semaphore/pkg/tz"
+	proServer "github.com/semaphoreui/semaphore/pro/services/server"
 	"github.com/semaphoreui/semaphore/services/runners"
 	"github.com/semaphoreui/semaphore/services/tasks"
 	"github.com/semaphoreui/semaphore/util"
@@ -248,7 +249,7 @@ func TestUpdateRunner_RunningTaskAcceptedWithoutTermination(t *testing.T) {
 
 // helpers.Bind decodes the request body into memory with nothing bounding it,
 // so before the limit an authenticated runner could hold the server hostage
-// with one endless progress report (review findings m6 / m-12).
+// with one endless progress report.
 func TestBodyLimitMiddlewareStopsAnEndlessBody(t *testing.T) {
 	var read int64
 	var readErr error
@@ -338,4 +339,128 @@ func TestRegisterRunner_NonSmrsTokenWithoutGlobalMatchReturnsBadRequest(t *testi
 	RegisterRunner(w, req)
 
 	assert.Equal(t, http.StatusBadRequest, w.Code)
+}
+
+// A runner's progress report carries the status and the resolved host list in
+// one message. The status is what settles the pending snapshot claim, so
+// applying it first left StoreResolved with no pending row to replace and the
+// host list — already produced, already correct — was dropped with an Info log.
+func TestUpdateRunner_StoresTheResolvedInventoryOfAStoppedTask(t *testing.T) {
+	prevCfg := util.Config
+	t.Cleanup(func() { util.Config = prevCfg })
+
+	store := sql.InitConfigCreateTestStore()
+
+	project, err := store.CreateProject(db.Project{Name: "resolve"})
+	require.NoError(t, err)
+
+	key, err := store.CreateAccessKey(db.AccessKey{ProjectID: &project.ID, Type: db.AccessKeyNone})
+	require.NoError(t, err)
+
+	repository, err := store.CreateRepository(db.Repository{
+		ProjectID: project.ID,
+		SSHKeyID:  key.ID,
+		Name:      "repo",
+		GitURL:    "git@example.com:test/test",
+		GitBranch: "main",
+	})
+	require.NoError(t, err)
+
+	inventory, err := store.CreateInventory(db.Inventory{
+		ProjectID: project.ID,
+		Name:      "dynamic",
+		Type:      db.InventoryFile,
+		Inventory: "dynamic.py",
+	})
+	require.NoError(t, err)
+
+	template, err := store.CreateTemplate(db.Template{
+		Name:         "resolve",
+		Playbook:     "test.yml",
+		ProjectID:    project.ID,
+		RepositoryID: repository.ID,
+		InventoryID:  &inventory.ID,
+	})
+	require.NoError(t, err)
+
+	runner, err := store.CreateRunner(db.Runner{Name: "worker", Token: "resolve-order-test-token"})
+	require.NoError(t, err)
+
+	runnerID := runner.ID
+
+	task, err := store.CreateTask(db.Task{
+		ProjectID:   project.ID,
+		TemplateID:  template.ID,
+		InventoryID: &inventory.ID,
+		RunnerID:    &runnerID,
+		Status:      task_logger.TaskRunningStatus,
+		Params:      db.MapStringAnyField{"resolve_inventory_only": true},
+	}, 0)
+	require.NoError(t, err)
+
+	claimed, err := store.ClaimInventorySnapshotResolve(project.ID, inventory.ID)
+	require.NoError(t, err)
+	require.True(t, claimed)
+	require.NoError(t, store.AssignInventorySnapshotResolveTask(project.ID, inventory.ID, task.ID))
+
+	// A terminal status finalizes the task in a goroutine of its own, and
+	// finalization writes the task log, so this pool needs a real log service
+	// where the pools above could do with nil.
+	pool := tasks.CreateTaskPool(
+		store,
+		tasks.NewMemoryTaskStateStore(),
+		nil,
+		nil,
+		nil,
+		nil,
+		proServer.NewLogWriteService(),
+		nil,
+		nil,
+	)
+	ctrl := NewRunnerController(nil, &pool, nil, nil)
+
+	tr := tasks.NewTaskRunner(task, &pool, "", nil)
+	tr.Inventory = inventory
+	pool.StateStore().SetRunning(tr)
+
+	req := newProgressRequest(t, store, runner, runners.RunnerProgress{
+		Jobs: []runners.JobProgress{{
+			ID:     task.ID,
+			Status: task_logger.TaskStoppedStatus,
+			ResolvedInventory: &db.InventorySnapshotContent{
+				Hosts:  []string{"i-0a1"},
+				Groups: []db.InventorySnapshotGroupContent{{Name: "web", Hosts: []string{"i-0a1"}}},
+			},
+		}},
+	})
+	w := httptest.NewRecorder()
+
+	ctrl.UpdateRunner(w, req)
+
+	require.Equal(t, http.StatusOK, w.Code)
+
+	snapshot, err := store.GetInventorySnapshot(project.ID, inventory.ID)
+	require.NoError(t, err)
+	assert.Equal(t, db.InventorySnapshotStatusOK, snapshot.Status)
+	assert.Equal(t, 1, snapshot.HostCount)
+}
+
+// Registration is the one route of the internal API that takes no token, and it
+// decodes the body before it looks at the token it was sent. The report limit
+// is applied to the authenticated subrouter, which does not cover it.
+func TestRegistrationBodyLimitStopsAnEndlessBody(t *testing.T) {
+	var read int64
+	var readErr error
+
+	handler := RegistrationBodyLimitMiddleware(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		read, readErr = io.Copy(io.Discard, r.Body)
+	}))
+
+	req := httptest.NewRequest(http.MethodPost, "/api/internal/runners", endlessReader{})
+	handler.ServeHTTP(httptest.NewRecorder(), req)
+
+	require.Error(t, readErr, "reading past the cap must fail rather than continue")
+	assert.Equal(t, MaxRunnerRegistrationBodySize, read)
+	assert.Less(t, MaxRunnerRegistrationBodySize, MaxRunnerReportBodySize,
+		"a registration is a handful of short fields, not a progress report")
 }

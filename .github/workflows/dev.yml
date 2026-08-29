@@ -66,6 +66,14 @@ jobs:
       # The inventory parser has to agree with the tool it reproduces, and the
       # tests that check that need a real ansible-inventory. A venv keeps the
       # exact binary addressable without relying on PATH.
+      # ansible-core is tens of megabytes, and the pin below only changes when
+      # the parser constants do, so the venv is worth keeping between runs.
+      - name: Cache the ansible venv
+        uses: actions/cache@v6
+        with:
+          path: ~/.ansible-venv
+          key: ansible-venv-${{ runner.os }}-2.21.3
+
       - name: Install ansible for the inventory differential tests
         run: |
           python3 -m venv "$HOME/.ansible-venv"

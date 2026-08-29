@@ -53,6 +53,21 @@ const maxInventoryGroups = db.MaxInventorySnapshotGroups
 // maxInventoryGroups.
 const maxInventoryMemberships = db.MaxInventorySnapshotMemberships
 
+// maxHostPatternRanges caps how many bracketed ranges one host entry may carry.
+// expandHostPattern recurses once per range and rebuilds the whole pattern at
+// every level, so the cost grows quadratically with the number of brackets
+// while no budget above is spent at all: "h[0:0][0:0]..." expands to exactly
+// one host however many groups it holds. Measured on this parser, 50000 groups
+// on one line cost 4.9 s of CPU and 200000 exhausted memory. Real inventories
+// use one or two ranges.
+const maxHostPatternRanges = 8
+
+// maxHostPatternLength caps the length of a single host entry before expansion,
+// for the same reason: the entry is copied at every recursion level. A stored
+// host name may not exceed db.MaxInventoryHostNameLength anyway, and a range
+// pattern only adds its bounds on top of that.
+const maxHostPatternLength = 1024
+
 // asciiLetters mirrors Python's string.ascii_letters, which Ansible indexes to
 // resolve alphabetic range bounds. Lowercase precedes uppercase there, so
 // [x:C] runs x, y, z, A, B, C.
@@ -148,8 +163,8 @@ func feedINIInventory(builder *inventoryBuilder, content string) error {
 			continue
 		}
 
-		if strings.HasPrefix(line, "[") && strings.HasSuffix(line, "]") {
-			group, kind = parseINISectionHeader(line[1 : len(line)-1])
+		if body, ok := iniSectionHeader(line); ok {
+			group, kind = parseINISectionHeader(body)
 
 			if err := builder.declareGroup(group); err != nil {
 				return err
@@ -197,15 +212,24 @@ func feedYAMLInventory(builder *inventoryBuilder, content string) error {
 		return err
 	}
 
-	if root == nil {
-		return nil
-	}
-
 	mapping, ok := normalizeMapping(root)
 	if !ok {
+		// An empty document decodes to nil, which is a valid inventory holding
+		// nothing.
+		if root == nil {
+			return nil
+		}
+
 		return fmt.Errorf("inventory root must be a mapping of group names")
 	}
 
+	return feedYAMLMapping(builder, mapping)
+}
+
+// feedYAMLMapping adds an already decoded YAML inventory. A directory walk
+// decodes the document once to recognise the format and hands the result here,
+// rather than unmarshalling every file of the directory twice.
+func feedYAMLMapping(builder *inventoryBuilder, mapping map[string]any) error {
 	for name, node := range mapping {
 		if err := builder.declareGroup(name); err != nil {
 			return err
@@ -226,6 +250,30 @@ const (
 	iniSectionChildren
 	iniSectionVars
 )
+
+// iniSectionHeader reports the body of an INI section header when the line is
+// one. Ansible's ini plugin matches ^\[([^:\]\s]+)(?::(\w+))?\]\s*(?:\#.*)?$,
+// so a trailing comment belongs to the header line rather than to the section
+// it opens. Requiring the line to end with "]" instead would read "[web] # prod"
+// as a host literally named "[web]", drop the group, and send every host below
+// it to "ungrouped".
+func iniSectionHeader(line string) (string, bool) {
+	if !strings.HasPrefix(line, "[") {
+		return "", false
+	}
+
+	closing := strings.Index(line, "]")
+	if closing < 0 {
+		return "", false
+	}
+
+	rest := strings.TrimSpace(line[closing+1:])
+	if rest != "" && !strings.HasPrefix(rest, "#") {
+		return "", false
+	}
+
+	return line[1:closing], true
+}
 
 // parseINISectionHeader splits a section header body into a group name and the
 // kind of entries the section holds. A suffix other than :vars or :children
@@ -302,7 +350,7 @@ func (b *inventoryBuilder) declareGroup(name string) error {
 // hosts written before the first INI header and directly under YAML "all"
 // arrive.
 func (b *inventoryBuilder) addHostPattern(group string, pattern string) error {
-	names, err := expandHostPattern(pattern, b.budget)
+	names, err := expandHostPattern(stripHostPort(pattern), b.budget)
 	if err != nil {
 		return err
 	}
@@ -508,6 +556,16 @@ func expandHostPattern(pattern string, budget int) ([]string, error) {
 		return nil, InventoryTooLargeError{Limit: maxInventoryHosts, What: "hosts"}
 	}
 
+	// Both caps are re-checked on every recursion level, which is cheap: each
+	// level removes exactly one bracket group, so the count only falls.
+	if len(pattern) > maxHostPatternLength {
+		return nil, fmt.Errorf("host entry is longer than %d characters", maxHostPatternLength)
+	}
+
+	if strings.Count(pattern, "[") > maxHostPatternRanges {
+		return nil, fmt.Errorf("host entry carries more than %d range patterns", maxHostPatternRanges)
+	}
+
 	if !isHostRange(pattern) {
 		return []string{pattern}, nil
 	}
@@ -639,10 +697,17 @@ func numericSequence(begin string, end string, step int, budget int) ([]string, 
 
 	// Counted before the tokens are built: the whole point of the budget is to
 	// refuse [1:1000000] without first allocating a million strings.
-	count := (last-first)/step + 1
-	if count > budget {
+	//
+	// The span is compared against the budget before the +1 that turns it into
+	// a count, because the bounds are user input: for [0:9223372036854775807]
+	// the +1 overflows to a negative count, which passes "count > budget" and
+	// then panics in make().
+	span := (last - first) / step
+	if span >= budget {
 		return nil, InventoryTooLargeError{Limit: maxInventoryHosts, What: "hosts"}
 	}
+
+	count := span + 1
 
 	// A leading zero in the begin bound is Ansible's signal to zero-pad, and
 	// both bounds must then be written to the same width.
@@ -658,7 +723,12 @@ func numericSequence(begin string, end string, step int, budget int) ([]string, 
 
 	result := make([]string, 0, count)
 
-	for value := first; value <= last; value += step {
+	// Indexed rather than accumulated: "value += step" wraps around for a range
+	// ending near math.MaxInt64, and a wrapped value stays <= last forever, so
+	// the loop would never end while appending a name on every turn.
+	for i := 0; i < count; i++ {
+		value := first + i*step
+
 		if width > 0 {
 			result = append(result, fmt.Sprintf("%0*d", width, value))
 		} else {
@@ -667,6 +737,53 @@ func numericSequence(begin string, end string, step int, budget int) ([]string, 
 	}
 
 	return result, nil
+}
+
+// stripHostPort removes the ":port" suffix of a host entry, mirroring Ansible's
+// parse_address. A play addresses the host by its name alone, so a snapshot
+// that keeps the port would produce a --limit matching nothing.
+//
+// An unbracketed IPv6 address carries colons of its own and takes no port in
+// Ansible either, which is why the split only fires when the name part holds no
+// colon outside brackets.
+func stripHostPort(entry string) string {
+	colon := strings.LastIndex(entry, ":")
+	if colon < 0 {
+		return entry
+	}
+
+	port := entry[colon+1:]
+	if port == "" || strings.ContainsFunc(port, func(r rune) bool { return r < '0' || r > '9' }) {
+		return entry
+	}
+
+	name := entry[:colon]
+	if hasColonOutsideBrackets(name) {
+		return entry
+	}
+
+	return name
+}
+
+func hasColonOutsideBrackets(name string) bool {
+	depth := 0
+
+	for _, char := range name {
+		switch char {
+		case '[':
+			depth++
+		case ']':
+			if depth > 0 {
+				depth--
+			}
+		case ':':
+			if depth == 0 {
+				return true
+			}
+		}
+	}
+
+	return false
 }
 
 // normalizeMapping accepts both shapes yaml.v3 produces for a mapping decoded

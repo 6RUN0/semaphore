@@ -628,7 +628,9 @@ definitions:
         enum: [ok, error, unsupported, pending]
       error:
         type: string
-        description: Why the host list could not be built; empty when status is ok.
+        description: >-
+          Why the host list could not be built. Absent when status is ok --
+          the field is omitted rather than sent empty.
       host_count:
         type: integer
       created:
@@ -636,7 +638,9 @@ definitions:
         format: date-time
       task_id:
         type: integer
-        x-nullable: true
+        description: >-
+          The resolve task that is filling this snapshot in. Absent while none
+          is running; never sent as null.
 
   InventorySnapshotHost:
     type: object
@@ -2985,6 +2989,12 @@ paths:
         snapshot always describes the inventory as it stands. For an inventory
         held in a repository the current commit decides that, which costs no
         fetch while it has not moved.
+
+
+        Rebuilding is a side effect of this request: it may consult the
+        repository's remote, check the repository out on the server, and store
+        the resulting host list. Any project member may issue it, and every
+        member sees the host and group names it returns.
       parameters:
         - name: template_id
           in: query

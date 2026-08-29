@@ -50,8 +50,34 @@ properties:
   target_host_var:
     type: string
     pattern: "^([a-zA-Z_][a-zA-Z0-9_]*)?$"
-    not:
-      pattern: "^(ansible|semaphore)_"
+    # The server refuses to start on a name Ansible already owns, so a value
+    # this schema accepts and the server then rejects turns a configuration
+    # mistake into a failed restart. Kept in step with
+    # reservedTargetHostVarNames in util/config.go.
+    allOf:
+      - not:
+          pattern: "^(ansible|semaphore)_"
+      - not:
+          enum:
+            - group_names
+            - groups
+            - hostvars
+            - inventory_dir
+            - inventory_file
+            - inventory_hostname
+            - inventory_hostname_short
+            - omit
+            - play_hosts
+            - playbook_dir
+            - role_name
+            - role_names
+            - role_path
+            - environment
+            - hosts
+            - vars
+            - lookup
+            - q
+            - query
     description: >-
       Name of an extra variable carrying the hosts picked in the task form, in
       addition to semaphore_vars.limit. Lets a playbook that selects hosts

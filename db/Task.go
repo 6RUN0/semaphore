@@ -140,26 +140,44 @@ func (task *Task) IsInventoryResolve() bool {
 	return ok && resolve
 }
 
+// NormalizeDeprecatedLimit moves the deprecated top-level "limit" field of a
+// task into Params, which is where everything downstream reads it from.
+//
+// It has to run before the task is validated, not only from the PreInsert hook:
+// the hook fires inside CreateTask, which ValidateNewTask has already returned
+// from, so a limit left for the hook to move would reach --limit and the extra
+// vars without ValidateAnsibleLimit ever having seen it.
+//
+// Idempotent by design — an existing Params["limit"] always wins, so calling it
+// from both places moves the value exactly once.
+func (task *Task) NormalizeDeprecatedLimit() {
+	if task.Limit == "" {
+		return
+	}
+
+	if _, ok := task.Params["limit"]; ok {
+		return
+	}
+
+	if task.Params == nil {
+		task.Params = make(MapStringAnyField)
+	}
+
+	limits := strings.Split(task.Limit, ",")
+
+	for i := range limits {
+		limits[i] = strings.TrimSpace(limits[i])
+	}
+
+	task.Params["limit"] = limits
+}
+
 // PreInsert is a hook which is called before inserting task into database.
 // Called directly in BoltDB implementation.
 func (task *Task) PreInsert(gorp.SqlExecutor) error {
 	task.Created = tz.In(task.Created)
 
-	if _, ok := task.Params["limit"]; !ok {
-		if task.Params == nil {
-			task.Params = make(MapStringAnyField)
-		}
-
-		if task.Limit != "" {
-			limits := strings.Split(task.Limit, ",")
-
-			for i := range limits {
-				limits[i] = strings.TrimSpace(limits[i])
-			}
-
-			task.Params["limit"] = limits
-		}
-	}
+	task.NormalizeDeprecatedLimit()
 
 	return nil
 }
@@ -210,6 +228,11 @@ func (task *Task) GetUrl() *string {
 }
 
 func (task *Task) ValidateNewTask(template Template) error {
+	// The deprecated field is a second way to say the same thing, and the hook
+	// that used to move it runs after this function. Moving it here is what
+	// makes the checks below see the value the executor will actually use.
+	task.NormalizeDeprecatedLimit()
+
 	if task.GitBranch != nil {
 		if err := git.ValidateGitBranch(*task.GitBranch, "task"); err != nil {
 			return err
@@ -245,7 +268,11 @@ func (task *Task) ValidateNewTask(template Template) error {
 			return err
 		}
 
-		return ValidateTaskEnvironment(task.Environment)
+		if err := ValidateTaskEnvironment(task.Environment); err != nil {
+			return err
+		}
+
+		return ValidateTaskSecret(task.Secret)
 	}
 
 	return nil

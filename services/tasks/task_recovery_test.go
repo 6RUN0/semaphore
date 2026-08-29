@@ -173,26 +173,28 @@ type slowRecoveryStore struct {
 	release chan struct{}
 }
 
-func (s *slowRecoveryStore) GetUnfinishedTasks(int) ([]db.Task, int, error) {
+func (s *slowRecoveryStore) GetUnfinishedTasks([]task_logger.TaskStatus, int) ([]db.Task, int, error) {
 	close(s.started)
 	<-s.release
 	return nil, 0, nil
 }
 
-// limitRecordingStore captures the cap recovery asks the store for.
+// limitRecordingStore captures what recovery asks the store for.
 type limitRecordingStore struct {
 	db.Store
 
-	limit int
+	statuses []task_logger.TaskStatus
+	limit    int
 }
 
-func (s *limitRecordingStore) GetUnfinishedTasks(limit int) ([]db.Task, int, error) {
+func (s *limitRecordingStore) GetUnfinishedTasks(statuses []task_logger.TaskStatus, limit int) ([]db.Task, int, error) {
+	s.statuses = statuses
 	s.limit = limit
 	return nil, 0, nil
 }
 
 // Recovery costs several queries per row, so it takes a bounded slice of the
-// unfinished rows rather than all of them (review finding M6).
+// unfinished rows rather than all of them.
 func TestRecoveryAsksForABoundedNumberOfTasks(t *testing.T) {
 	store := sql.InitConfigCreateTestStore()
 	recording := &limitRecordingStore{Store: store}
@@ -213,12 +215,20 @@ func TestRecoveryAsksForABoundedNumberOfTasks(t *testing.T) {
 
 	assert.Equal(t, maxTasksToRecover, recording.limit)
 	assert.Positive(t, maxTasksToRecover)
+
+	// The cap has to bound the rows recovery acts on, so the narrowing belongs
+	// in the query. Asked for every unfinished status instead, a pass would
+	// spend its whole budget on queued and rejected rows, which hold the lowest
+	// ids and which nothing ever settles.
+	assert.ElementsMatch(t, recoverableTaskStatuses(), recording.statuses)
+	assert.NotContains(t, recording.statuses, task_logger.TaskWaitingStatus)
+	assert.NotContains(t, recording.statuses, task_logger.TaskRejected)
 }
 
 // AddTask finishes by writing to the pool's unbuffered register channel, which
 // only Run's select loop reads. Recovery used to run before that loop started,
 // so every API "run task" call and every schedule that fired during recovery
-// hung until it finished (review finding M5).
+// hung until it finished.
 func TestRecoveryDoesNotBlockTheQueue(t *testing.T) {
 	store := sql.InitConfigCreateTestStore()
 	slow := &slowRecoveryStore{
@@ -241,9 +251,11 @@ func TestRecoveryDoesNotBlockTheQueue(t *testing.T) {
 
 	go pool.Run()
 
+	// Released before Stop, not after: Stop waits for the recovery goroutine to
+	// exit, and this store is holding it inside GetUnfinishedTasks.
 	defer func() {
-		pool.Stop()
 		close(slow.release)
+		pool.Stop()
 	}()
 
 	<-slow.started
@@ -274,7 +286,18 @@ func TestRecoveryDoesNotBlockTheQueue(t *testing.T) {
 
 	assert.False(t, pool.isRecovered(), "recovery is still in flight")
 
-	time.Sleep(100 * time.Millisecond)
+	// Two events rather than a sleep: queueEvents is unbuffered and handleQueue
+	// is its only reader, so accepting the second one proves the first was
+	// processed to the end of the loop body — the point where the task would
+	// have been started had the barrier been open. A sleep would assert the
+	// same thing only for as long as a loaded machine keeps up.
+	for i := 0; i < 2; i++ {
+		select {
+		case pool.queueEvents <- PoolEvent{EventTypeEmpty, nil}:
+		case <-time.After(5 * time.Second):
+			t.Fatal("the queue loop never accepted the wake-up event")
+		}
+	}
 
 	found := false
 	for _, queued := range pool.state.QueueRange() {
@@ -326,7 +349,7 @@ func TestStopTaskSurvivesBrokenDetails(t *testing.T) {
 
 // A task that already finished before the Stop request reached this path must
 // not have its result rewritten to "stopped" just because its details can no
-// longer be loaded (review finding B2).
+// longer be loaded.
 func TestStopTaskWithBrokenDetailsLeavesAFinishedTaskAlone(t *testing.T) {
 	store := sql.InitConfigCreateTestStore()
 
@@ -366,7 +389,7 @@ func TestStopTaskOnAbsentTask(t *testing.T) {
 }
 
 // An open UI learns of status changes from the event feed; recovery must not
-// be the silent exception to that (review finding M5).
+// be the silent exception to that.
 func TestRecoveryWritesAnEvent(t *testing.T) {
 	pool, store := newRecoveryPool(t)
 	_, _, task := newResolveTask(t, store)

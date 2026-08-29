@@ -65,6 +65,37 @@ Open [localhost:3000](http://localhost:3000)
 Note: for Windows, you may need [Cygwin](https://www.cygwin.com/) to run certain commands because the [reflex](github.com/cespare/reflex) package probably doesn't work on Windows.
 You may encounter issues when running `task watch`, but running `task build` etc... will still be OK.
 
+## Tests
+
+```bash
+task test              # Go unit tests and the web unit tests
+task test:dialects     # the database tests against real MySQL/MariaDB/PostgreSQL
+task test:dialects:down  # remove those databases, including their data
+```
+
+`task test:dialects` starts the engines listed in `compose.test.yml` through
+Docker and leaves them running, so a second run starts immediately. It sets
+`SEMAPHORE_TEST_DIALECTS_REQUIRED=1`, which turns a database that did not come
+up into a failure instead of a skipped test.
+
+Some tests run real `ansible-inventory` and are skipped when it is missing, so
+a green local run is not necessarily a green CI run:
+
+| Variable | Effect |
+|----------|--------|
+| `SEMAPHORE_TEST_ANSIBLE_INVENTORY` | Path to `ansible-inventory`; without it the differential inventory tests are skipped. |
+| `SEMAPHORE_TEST_ANSIBLE_REQUIRED` | Makes those skips a failure. Set in CI. |
+| `SEMAPHORE_TEST_MYSQL` / `SEMAPHORE_TEST_POSTGRES` | DSN of a server for the dialect tests. |
+| `SEMAPHORE_TEST_DIALECTS_REQUIRED` | Makes a missing dialect server a failure. |
+
+Mutation testing is available but is not a gate — it is run by hand when a
+package's coverage is worth examining:
+
+```bash
+task test:mutation:deps   # installs gremlins
+task test:mutation -- ./db
+```
+
 ## Integration tests
 
 Dredd is used for API integration tests, if you alter the API in any way you must make sure that the information in the api docs
