@@ -27,3 +27,31 @@ func TestTemplate_Validate_App(t *testing.T) {
 	empty := &Template{Name: "legacy", Playbook: "site.yml", App: ""}
 	assert.NoError(t, empty.Validate())
 }
+
+// IsTerraform gates state handling, the workspace inventory types and the
+// "playbook may be empty" rule, so a missing app in the list is a silent
+// behaviour change rather than an error.
+func TestTemplateApp_IsTerraform(t *testing.T) {
+	tests := []struct {
+		app  TemplateApp
+		want bool
+	}{
+		{AppTerraform, true},
+		{AppTofu, true},
+		{AppTerragrunt, true},
+
+		{AppAnsible, false},
+		{AppBash, false},
+		{AppPowerShell, false},
+		{AppPython, false},
+		{AppPulumi, false},
+		{TemplateApp(""), false},
+		{TemplateApp("terraforming"), false},
+	}
+
+	for _, tt := range tests {
+		t.Run(string(tt.app), func(t *testing.T) {
+			assert.Equal(t, tt.want, tt.app.IsTerraform())
+		})
+	}
+}

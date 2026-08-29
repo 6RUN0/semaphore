@@ -4,6 +4,7 @@ import (
 	"testing"
 
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 func TestObjectToJSON(t *testing.T) {
@@ -61,4 +62,25 @@ func TestGetAccessKeyOptionsValidate(t *testing.T) {
 			}
 		})
 	}
+}
+
+// A slice field is stored as NULL when it holds nothing, so an empty list and
+// "no list at all" stay distinguishable in the database.
+func TestObjectToJSON_Slices(t *testing.T) {
+	t.Run("nil slice", func(t *testing.T) {
+		var v []string
+		assert.Nil(t, ObjectToJSON(v))
+	})
+
+	t.Run("empty but allocated slice", func(t *testing.T) {
+		s := ObjectToJSON([]string{})
+		require.NotNil(t, s)
+		assert.Equal(t, "[]", *s)
+	})
+
+	t.Run("populated slice", func(t *testing.T) {
+		s := ObjectToJSON([]string{"a", "b"})
+		require.NotNil(t, s)
+		assert.Equal(t, `["a","b"]`, *s)
+	})
 }

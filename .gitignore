@@ -60,6 +60,7 @@
 !/.gitmodules
 !/.golangci.yml
 !/.goreleaser.yml
+!/.gremlins.yaml
 
 # Dot-entries nested inside the allowed tree.
 !/examples/authentik_ldap/.gitignore

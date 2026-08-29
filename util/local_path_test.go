@@ -22,6 +22,31 @@ func TestIsWindowsLocalRepositoryPath(t *testing.T) {
 		{``, false},
 		{`/usr/src`, false},
 		{`https://x`, false},
+
+		// Both ends of both drive-letter ranges: the check is a pair of range
+		// comparisons, and an off-by-one on either end silently rejects a real
+		// drive.
+		{`A:\x`, true},
+		{`Z:\x`, true},
+		{`a:\x`, true},
+		{`z:\x`, true},
+		// Adjacent to the ranges, so a widened comparison turns punctuation into
+		// a drive letter. ':' matters most: it is what a URL scheme ends with.
+		{`1:`, false},
+		{`@:\x`, false},
+		{`[:\x`, false},
+		{`Dr`, false},
+
+		// A backslash somewhere other than the first two bytes is not a UNC path.
+		{`a\bc`, false},
+		// Bare drive with a separator: one byte shorter than any path, and the
+		// URL check below reads p[3].
+		{`D:/`, true},
+		{`D:\`, true},
+		// Only "<letter>://" is refused (it reads as a URL scheme); a slash after
+		// a backslash is just a mixed-separator path.
+		{`D:\/repo`, true},
+		{`d://repo`, false},
 	}
 	for _, tt := range tests {
 		if got := IsWindowsLocalRepositoryPath(tt.path); got != tt.want {

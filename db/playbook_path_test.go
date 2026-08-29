@@ -27,6 +27,8 @@ func TestValidatePlaybookPath(t *testing.T) {
 		{"only dot-dot", "..", false},
 		{"windows absolute path", "C:\\Windows\\evil.ps1", false},
 		{"windows drive forward slashes", "c:/windows/evil.ps1", false},
+		// The shortest form a drive letter can take: two bytes, no separator.
+		{"windows bare drive", "C:", false},
 		{"windows parent escape", "..\\evil.ps1", false},
 		{"windows unc path", "\\\\server\\share\\evil.ps1", false},
 	}

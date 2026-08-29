@@ -428,3 +428,135 @@ func TestEncryptionConfigGetters(t *testing.T) {
 		assert.Equal(t, 15*time.Second, Config.EncryptionKeysPollInterval())
 	})
 }
+
+// keysetsEqual decides whether a reload swaps the live keyset. A false "equal"
+// keeps a rotated key out of the process, so every field it compares needs a
+// case that differs in that field alone.
+func TestKeysetsEqual(t *testing.T) {
+	base := func() *keyset {
+		return &keyset{
+			byID:         map[string]string{"id-a": "material-a"},
+			accessID:     "id-a",
+			optionID:     "id-o",
+			legacyAccess: "flat-access",
+			legacyOption: "flat-option",
+		}
+	}
+
+	t.Run("both nil", func(t *testing.T) {
+		assert.True(t, keysetsEqual(nil, nil))
+	})
+
+	t.Run("one nil", func(t *testing.T) {
+		assert.False(t, keysetsEqual(nil, base()))
+		assert.False(t, keysetsEqual(base(), nil))
+	})
+
+	// Distinct pointers, so an identity comparison would report them unequal.
+	t.Run("equal content", func(t *testing.T) {
+		assert.True(t, keysetsEqual(base(), base()))
+	})
+
+	tests := []struct {
+		name   string
+		change func(*keyset)
+	}{
+		{"active access id", func(k *keyset) { k.accessID = "id-b" }},
+		{"active option id", func(k *keyset) { k.optionID = "id-p" }},
+		{"flat access key", func(k *keyset) { k.legacyAccess = "other" }},
+		{"flat option key", func(k *keyset) { k.legacyOption = "other" }},
+		{"registry size", func(k *keyset) { k.byID["id-b"] = "material-b" }},
+		{"key material under the same id", func(k *keyset) { k.byID["id-a"] = "rotated" }},
+		{"same size, different ids", func(k *keyset) {
+			delete(k.byID, "id-a")
+			k.byID["id-b"] = "material-a"
+		}},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			changed := base()
+			tt.change(changed)
+
+			assert.False(t, keysetsEqual(base(), changed))
+			assert.False(t, keysetsEqual(changed, base()))
+		})
+	}
+}
+
+// currentKeyset is the path a unit test (or a process whose ConfigInit has not
+// run) takes: the flat fields become a one-key registry. An id must be minted
+// only for a key that is actually set, otherwise the empty passthrough key is
+// registered under the empty id and every lookup finds it.
+func TestCurrentKeysetFallsBackToFlatFields(t *testing.T) {
+	access := genKey(0x01)
+	option := genKey(0x02)
+
+	t.Run("no keys configured", func(t *testing.T) {
+		ks := (&ConfigType{}).currentKeyset()
+
+		assert.Empty(t, ks.byID)
+		assert.Empty(t, ks.accessID)
+		assert.Empty(t, ks.optionID)
+	})
+
+	t.Run("flat access key only", func(t *testing.T) {
+		ks := (&ConfigType{AccessKeyEncryption: access}).currentKeyset()
+
+		assert.Equal(t, keyID(access), ks.accessID)
+		assert.Equal(t, map[string]string{keyID(access): access}, ks.byID)
+		assert.Empty(t, ks.optionID)
+	})
+
+	t.Run("both flat keys", func(t *testing.T) {
+		ks := (&ConfigType{AccessKeyEncryption: access, OptionEncryption: option}).currentKeyset()
+
+		assert.Equal(t, keyID(access), ks.accessID)
+		assert.Equal(t, keyID(option), ks.optionID)
+		assert.Len(t, ks.byID, 2)
+	})
+}
+
+// An active key file the folder scan did not register is read on its own:
+// relative to keys_folder, or as given when it is absolute. The subdirectory
+// covers both halves at once — the scan has to skip a non-regular entry, and
+// the file inside it is then only reachable through the join.
+func TestKeyset_ActiveKeyFileOutsideFolder(t *testing.T) {
+	keyA, keyB := genKey(0x01), genKey(0x02)
+
+	folder := t.TempDir()
+	require.NoError(t, os.MkdirAll(filepath.Join(folder, "nested"), 0o700))
+	require.NoError(t, os.WriteFile(filepath.Join(folder, "nested", "access.txt"), []byte(keyA), 0o600))
+
+	elsewhere := filepath.Join(t.TempDir(), "option.txt")
+	require.NoError(t, os.WriteFile(elsewhere, []byte(keyB), 0o600))
+
+	enc := &EncryptionKeysConfig{
+		KeysFolder: folder,
+		Active: ActivePointers{
+			SecretKeyFile: filepath.Join("nested", "access.txt"),
+			OptionKeyFile: elsewhere,
+		},
+	}
+
+	Config = mustKeyset(t, enc, "", "")
+
+	assert.Equal(t, keyID(keyA), Config.ActiveAccessKeyID())
+	assert.Equal(t, keyID(keyB), Config.ActiveOptionKeyID())
+}
+
+// A reload can arrive (SIGHUP, the keys-file watcher) before anything resolved
+// the keyring, so the store has to be created rather than assumed present.
+func TestReloadEncryptionKeys_WithoutPriorResolve(t *testing.T) {
+	keyA := genKey(0x01)
+	keysPath := filepath.Join(t.TempDir(), "keys.json")
+	require.NoError(t, os.WriteFile(keysPath,
+		[]byte(`{"keys":{"a":{"value":"`+keyA+`"}},"active":{"secret_key":"a"}}`), 0o600))
+
+	Config = &ConfigType{Encryption: &EncryptionConfig{KeysFile: keysPath}}
+	require.Nil(t, Config.keys)
+
+	require.NoError(t, ReloadEncryptionKeys())
+
+	assert.Equal(t, keyID(keyA), Config.ActiveAccessKeyID())
+}

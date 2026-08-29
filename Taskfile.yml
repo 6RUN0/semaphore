@@ -141,6 +141,25 @@ tasks:
     cmds:
       - go test -v -coverprofile=coverage.out ./...
 
+  test:mutation:deps:
+    desc: Installs gremlins which is required by mutation testing
+    vars:
+      GREMLINS_VERSION: v0.6.0
+    cmds:
+      - go install github.com/go-gremlins/gremlins/cmd/gremlins@{{ .GREMLINS_VERSION }}
+    dir: /tmp
+
+  test:mutation:
+    desc: Run mutation testing on a directory, e.g. `task test:mutation -- ./services/tasks`
+    summary: |
+      Checks how much the test suite actually asserts: gremlins alters covered
+      statements one at a time and reports the ones no test noticed (LIVED).
+
+      Settings live in .gremlins.yaml. Scope the run — the whole module takes
+      hours, and it copies the checkout into $TMPDIR once per worker.
+    cmds:
+      - gremlins unleash {{ .CLI_ARGS | default "." }}
+
   dredd:goodman:
     desc: Installs goodman which is required by dredd
     cmds:

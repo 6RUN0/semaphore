@@ -72,3 +72,35 @@ func TestRepository_GetGitURL(t *testing.T) {
 		assert.Equal(t, v.ExpectedGitUrl, gitUrl, "wrong gitUrl")
 	}
 }
+
+func TestRepository_Validate(t *testing.T) {
+	tests := []struct {
+		name    string
+		repo    Repository
+		wantErr string
+	}{
+		{"remote with branch", Repository{Name: "r", GitURL: "https://example.com/x.git", GitBranch: "main"}, ""},
+		// A local repository is a directory on the node: there is no branch to
+		// check out, and demanding one would make it unusable.
+		{"local without branch", Repository{Name: "r", GitURL: "/srv/repos/x"}, ""},
+		{"local windows path without branch", Repository{Name: "r", GitURL: `D:\repos\x`}, ""},
+
+		{"no name", Repository{GitURL: "https://example.com/x.git", GitBranch: "main"}, "name can't be empty"},
+		{"no url", Repository{Name: "r", GitBranch: "main"}, "url can't be empty"},
+		{"url reads as a command line option", Repository{Name: "r", GitURL: "--upload-pack=evil", GitBranch: "main"}, "url is invalid"},
+		{"remote without branch", Repository{Name: "r", GitURL: "https://example.com/x.git"}, "branch can't be empty"},
+		{"branch name git rejects", Repository{Name: "r", GitURL: "https://example.com/x.git", GitBranch: "bad branch"}, "branch name is invalid"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			err := tt.repo.Validate()
+
+			if tt.wantErr == "" {
+				assert.NoError(t, err)
+				return
+			}
+			assert.ErrorContains(t, err, tt.wantErr)
+		})
+	}
+}

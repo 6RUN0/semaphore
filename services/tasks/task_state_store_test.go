@@ -277,3 +277,30 @@ func TestMemoryTaskStateStore_TryFinalize_ExactlyOnce(t *testing.T) {
 
 // MemoryTaskStateStore must satisfy the TaskStateInspector contract.
 var _ TaskStateInspector = (*MemoryTaskStateStore)(nil)
+
+// The per-project map is dropped once it empties, which keeps the store from
+// growing a bucket per project ever seen. It must only be dropped when the
+// project really has nothing left running.
+func TestMemoryTaskStateStore_RemoveActive(t *testing.T) {
+	s := NewMemoryTaskStateStore()
+
+	first := newTestRunner(1, 10, 100)
+	second := newTestRunner(2, 10, 100)
+	s.AddActive(10, first)
+	s.AddActive(10, second)
+
+	s.RemoveActive(10, first.Task.ID)
+
+	assert.Equal(t, 1, s.ActiveCount(10))
+	assert.Equal(t, []*TaskRunner{second}, s.GetActive(10))
+
+	s.RemoveActive(10, second.Task.ID)
+
+	assert.Zero(t, s.ActiveCount(10))
+	assert.Empty(t, s.GetActive(10))
+
+	// A project that was never active, and one already emptied, both answer
+	// without a bucket to look in.
+	s.RemoveActive(99, 1)
+	assert.Empty(t, s.GetActive(99))
+}

@@ -146,6 +146,10 @@ func TestValidateSurveyVar(t *testing.T) {
 		{"enum: scalar not in list rejected", SurveyVar{Name: "V", Type: SurveyVarEnum, Values: enumValues, DefaultValue: strVal("zzz")}, "not in values list"},
 		{"enum: array of one ok (lenient)", SurveyVar{Name: "V", Type: SurveyVarEnum, Values: enumValues, DefaultValue: arrVal("a")}, ""},
 		{"enum: array of multi rejected", SurveyVar{Name: "V", Type: SurveyVarEnum, Values: enumValues, DefaultValue: arrVal("a", "b")}, "must be a string for enum"},
+		// An empty array carries no value to look up in the list; the membership
+		// check has to skip it rather than read the first element.
+		{"enum: empty array ok", SurveyVar{Name: "V", Type: SurveyVarEnum, Values: enumValues, DefaultValue: arrVal()}, ""},
+		{"enum: empty non-array ok", SurveyVar{Name: "V", Type: SurveyVarEnum, Values: enumValues, DefaultValue: &SurveyVarDefaultValue{}}, ""},
 
 		// --- string / int / text / secret types ---
 		{"string: nil default ok", SurveyVar{Name: "V", Type: SurveyVarStr}, ""},
@@ -189,4 +193,17 @@ func TestTemplateValidate_SurveyVarDefaultValue(t *testing.T) {
 
 func strPtr(s string) *string {
 	return &s
+}
+
+// The tag names the runner a template is pinned to; unset means any runner. An
+// empty string is neither, and would pin the template to a runner that cannot
+// exist.
+func TestTemplateValidate_RunnerTag(t *testing.T) {
+	tpl := func(tag *string) *Template {
+		return &Template{Name: "test", Playbook: "site.yml", RunnerTag: tag}
+	}
+
+	assert.EqualError(t, tpl(strPtr("")).Validate(), "template runner tag can not be empty")
+	assert.NoError(t, tpl(strPtr("gpu")).Validate())
+	assert.NoError(t, tpl(nil).Validate())
 }

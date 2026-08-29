@@ -1,0 +1,74 @@
+# Mutation testing with gremlins (https://gremlins.dev).
+#
+#   task test:mutation -- ./db
+#
+# A run is scoped to the directory given on the command line. Gremlins measures
+# the coverage of that scope first and only mutates covered statements, because
+# a mutant no test executes proves nothing about the suite.
+#
+# The working tree is never touched: the module is copied into
+# $TMPDIR/gremlins-*/wd-* once per worker and the copy is what gets mutated. The
+# copy is the whole module, web/node_modules included, so a run needs roughly
+# (size of the checkout x workers) of free space in $TMPDIR.
+
+unleash:
+  # Bounded by free space rather than by cores, for the reason above.
+  workers: 4
+
+  # Per-mutant timeout = elapsed time of the coverage run x coefficient.
+  # The baseline counts test execution only, while every mutant run also has to
+  # compile, link and start the test binary, so a package whose unit tests
+  # finish in milliseconds needs a coefficient far above the tool's default
+  # of 3. Measured on ./db, whose own tests take ~20 ms: with the default, 487
+  # of 489 mutants came back TIMED OUT and the report was worthless; at 60,
+  # three did. 100 leaves margin on a loaded machine.
+  timeout-coefficient: 100
+
+  # Quality gates: a non-zero threshold makes gremlins exit non-zero when
+  # efficacy (killed over killed+lived) or mutant coverage falls below it. Left
+  # off, and meant to be raised per package on the command line — coverage here
+  # is uneven enough that one repository-wide number would be either
+  # unreachable or meaningless.
+  threshold:
+    efficacy: 0
+    mutant-coverage: 0
+
+  # Code with no Go tests only produces NOT COVERED lines, which is free to run
+  # but buries the real findings. Excluded rather than skimmed past.
+  #
+  # Each pattern is matched against the path relative to the directory the run
+  # was scoped to, not to the module root, so they must stay unanchored:
+  # "^db/migration/" matches on a whole-module run and silently matches nothing
+  # once the run is narrowed to ./db.
+  exclude-files:
+    - "migration/"
+    - "\\.dredd/"
+
+mutants:
+  arithmetic-base:
+    enabled: true
+  conditionals-boundary:
+    enabled: true
+  conditionals-negation:
+    enabled: true
+  increment-decrement:
+    enabled: true
+  invert-negatives:
+    enabled: true
+
+  # Off in gremlins by default, on here: the code this repository most wants
+  # pinned is validation, which is mostly boolean, and swapping && for || is
+  # exactly the defect those tests exist to catch.
+  invert-logical:
+    enabled: true
+
+  invert-assignments:
+    enabled: false
+  invert-bitwise:
+    enabled: false
+  invert-bwassign:
+    enabled: false
+  invert-loopctrl:
+    enabled: false
+  remove-self-assignments:
+    enabled: false

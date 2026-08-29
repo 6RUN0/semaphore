@@ -1,6 +1,7 @@
 package util
 
 import (
+	"encoding/base64"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -25,6 +26,17 @@ func TestKeyID(t *testing.T) {
 
 	t.Run("invalid base64 yields empty id", func(t *testing.T) {
 		assert.Empty(t, keyID("not-base64!!!"))
+	})
+
+	// DecodeString returns the bytes it managed to decode *and* an error, so a
+	// value that is valid base64 up to the first bad byte still yields material.
+	// Fingerprinting it would mint an id for a key that was never really read.
+	t.Run("partially decodable base64 yields empty id", func(t *testing.T) {
+		raw, err := base64.StdEncoding.DecodeString("YWJjZGVm!!!!")
+		require.Error(t, err)
+		require.NotEmpty(t, raw)
+
+		assert.Empty(t, keyID("YWJjZGVm!!!!"))
 	})
 
 	t.Run("id is url-safe and colon-free", func(t *testing.T) {

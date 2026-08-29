@@ -2,6 +2,7 @@ package tasks
 
 import (
 	"encoding/json"
+	"path/filepath"
 	"strings"
 	"testing"
 
@@ -629,4 +630,222 @@ func extraVarsArg(t *testing.T, args []string) map[string]any {
 
 	require.Fail(t, "--extra-vars is missing from the arguments")
 	return nil
+}
+
+// playbookArgs runs the real argument builder over a template/task parameter
+// pair, which is where the override rules are actually applied.
+func playbookArgs(t *testing.T, tplParams, taskParams db.MapStringAnyField) []string {
+	t.Helper()
+
+	exec := &LocalExecutor{
+		Task:      db.Task{Params: taskParams},
+		Template:  db.Template{Playbook: "test.yml", TaskParams: tplParams},
+		Inventory: db.Inventory{Type: db.InventoryStatic},
+		Logger:    &recordingLogger{},
+	}
+
+	args, _, err := exec.getPlaybookArgs("admin", nil)
+	require.NoError(t, err)
+	return args
+}
+
+// hasArgPrefix reports whether any argument starts with prefix, so a test can
+// state that a flag is absent without guessing its value.
+func hasArgPrefix(args []string, prefix string) bool {
+	for _, arg := range args {
+		if strings.HasPrefix(arg, prefix) {
+			return true
+		}
+	}
+	return false
+}
+
+// The template decides whether a task may replace its tags. Both halves matter:
+// a task value must not leak through when the override is off, and the
+// template's own value must survive when the task sends none.
+func TestGetPlaybookArgsTagOverrides(t *testing.T) {
+	setupExecutorConfig(t)
+	util.Config.TmpPath = t.TempDir()
+
+	for _, flag := range []struct {
+		arg      string
+		tplKey   string
+		taskKey  string
+		allowKey string
+	}{
+		{"--tags=", "tags", "tags", "allow_override_tags"},
+		{"--skip-tags=", "skip_tags", "skip_tags", "allow_override_skip_tags"},
+	} {
+		t.Run(flag.arg, func(t *testing.T) {
+			t.Run("neither side sets any", func(t *testing.T) {
+				args := playbookArgs(t, nil, nil)
+
+				assert.False(t, hasArgPrefix(args, flag.arg))
+			})
+
+			t.Run("template value is passed", func(t *testing.T) {
+				args := playbookArgs(t, db.MapStringAnyField{flag.tplKey: []any{"deploy"}}, nil)
+
+				assert.Contains(t, args, flag.arg+"deploy")
+			})
+
+			t.Run("task value is ignored without the override", func(t *testing.T) {
+				args := playbookArgs(t,
+					db.MapStringAnyField{flag.tplKey: []any{"deploy"}},
+					db.MapStringAnyField{flag.taskKey: []any{"hotfix"}})
+
+				assert.Contains(t, args, flag.arg+"deploy")
+				assert.NotContains(t, args, flag.arg+"hotfix")
+			})
+
+			t.Run("task value replaces the template's with the override", func(t *testing.T) {
+				args := playbookArgs(t,
+					db.MapStringAnyField{flag.tplKey: []any{"deploy"}, flag.allowKey: true},
+					db.MapStringAnyField{flag.taskKey: []any{"hotfix", "urgent"}})
+
+				assert.Contains(t, args, flag.arg+"hotfix,urgent")
+			})
+
+			// The override is permission to replace, not an instruction to clear.
+			t.Run("template value survives an override the task did not use", func(t *testing.T) {
+				args := playbookArgs(t,
+					db.MapStringAnyField{flag.tplKey: []any{"deploy"}, flag.allowKey: true},
+					nil)
+
+				assert.Contains(t, args, flag.arg+"deploy")
+			})
+		})
+	}
+}
+
+// Verbosity is a template-level permission because -vvvv makes Ansible print
+// the values it is working with, which includes what secrets expand to.
+func TestGetPlaybookArgsDebugLevel(t *testing.T) {
+	setupExecutorConfig(t)
+	util.Config.TmpPath = t.TempDir()
+
+	t.Run("task debug is ignored without the permission", func(t *testing.T) {
+		args := playbookArgs(t, nil, db.MapStringAnyField{"debug": true, "debug_level": 3})
+
+		assert.False(t, hasArgPrefix(args, "-v"))
+	})
+
+	t.Run("permission alone adds nothing", func(t *testing.T) {
+		args := playbookArgs(t, db.MapStringAnyField{"allow_debug": true}, nil)
+
+		assert.False(t, hasArgPrefix(args, "-v"))
+	})
+
+	t.Run("unset level defaults to four", func(t *testing.T) {
+		args := playbookArgs(t,
+			db.MapStringAnyField{"allow_debug": true},
+			db.MapStringAnyField{"debug": true})
+
+		assert.Contains(t, args, "-vvvv")
+	})
+
+	t.Run("level is capped at six", func(t *testing.T) {
+		args := playbookArgs(t,
+			db.MapStringAnyField{"allow_debug": true},
+			db.MapStringAnyField{"debug": true, "debug_level": 9})
+
+		assert.Contains(t, args, "-vvvvvv")
+	})
+
+	// One is a level Ansible accepts, so it must not be mistaken for "unset".
+	t.Run("lowest explicit level is kept", func(t *testing.T) {
+		args := playbookArgs(t,
+			db.MapStringAnyField{"allow_debug": true},
+			db.MapStringAnyField{"debug": true, "debug_level": 1})
+
+		assert.Contains(t, args, "-v")
+	})
+
+	t.Run("level is passed through", func(t *testing.T) {
+		args := playbookArgs(t,
+			db.MapStringAnyField{"allow_debug": true},
+			db.MapStringAnyField{"debug": true, "debug_level": 2})
+
+		assert.Contains(t, args, "-vv")
+	})
+}
+
+// Extra CLI arguments are a template setting; a task may add its own only where
+// the template says so, in both the list and the map format.
+func TestGetCLIArgsOverride(t *testing.T) {
+	executor := func(allowOverride bool, taskArgs *string) *LocalExecutor {
+		tplArgs := `["--forks=5"]`
+		return &LocalExecutor{
+			Template: db.Template{Arguments: &tplArgs, AllowOverrideArgsInTask: allowOverride},
+			Task:     db.Task{Arguments: taskArgs},
+		}
+	}
+	taskArgs := `["--forks=50"]`
+
+	t.Run("list format", func(t *testing.T) {
+		tpl, task, err := executor(false, &taskArgs).getCLIArgs()
+		require.NoError(t, err)
+		assert.Equal(t, []string{"--forks=5"}, tpl)
+		assert.Empty(t, task)
+
+		tpl, task, err = executor(true, &taskArgs).getCLIArgs()
+		require.NoError(t, err)
+		assert.Equal(t, []string{"--forks=5"}, tpl)
+		assert.Equal(t, []string{"--forks=50"}, task)
+
+		_, task, err = executor(true, nil).getCLIArgs()
+		require.NoError(t, err)
+		assert.Empty(t, task)
+	})
+
+	t.Run("map format", func(t *testing.T) {
+		tpl, task, err := executor(false, &taskArgs).getCLIArgsMap()
+		require.NoError(t, err)
+		assert.Equal(t, map[string][]string{"default": {"--forks=5"}}, tpl)
+		assert.Empty(t, task)
+
+		tpl, task, err = executor(true, &taskArgs).getCLIArgsMap()
+		require.NoError(t, err)
+		assert.Equal(t, map[string][]string{"default": {"--forks=5"}}, tpl)
+		assert.Equal(t, map[string][]string{"default": {"--forks=50"}}, task)
+
+		_, task, err = executor(true, nil).getCLIArgsMap()
+		require.NoError(t, err)
+		assert.Empty(t, task)
+	})
+}
+
+// A local inventory is a file the node already has; anything else is copied
+// into the project's tmp dir under a generated name.
+func TestTmpInventoryFullPath(t *testing.T) {
+	setupExecutorConfig(t)
+	util.Config.TmpPath = t.TempDir()
+
+	exec := func(repo *db.Repository) *LocalExecutor {
+		return &LocalExecutor{
+			Template:  db.Template{ID: 7, ProjectID: 1},
+			Inventory: db.Inventory{ID: 3, Type: db.InventoryStatic, Repository: repo},
+		}
+	}
+
+	t.Run("no repository", func(t *testing.T) {
+		assert.Equal(t,
+			filepath.Join(util.Config.GetProjectTmpDir(1), "inventory_3"),
+			exec(nil).tmpInventoryFullPath())
+	})
+
+	t.Run("local repository is used in place", func(t *testing.T) {
+		repo := &db.Repository{GitURL: "/srv/inventories"}
+
+		assert.Equal(t, "/srv/inventories", exec(repo).tmpInventoryFullPath())
+	})
+
+	t.Run("remote repository is checked out into tmp", func(t *testing.T) {
+		repo := &db.Repository{ID: 5, GitURL: "https://example.com/inv.git", GitBranch: "main"}
+
+		path := exec(repo).tmpInventoryFullPath()
+
+		assert.True(t, strings.HasPrefix(path, util.Config.GetProjectTmpDir(1)), path)
+		assert.True(t, strings.HasSuffix(path, "_inventory_3"), path)
+	})
 }

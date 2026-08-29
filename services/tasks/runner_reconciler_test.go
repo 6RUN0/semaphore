@@ -195,6 +195,20 @@ func TestDecideRunnerTaskAction(t *testing.T) {
 			&db.Runner{Touched: ago(5 * time.Minute)},
 			RunnerTaskKeep,
 		},
+		// The timeouts are exclusive: a runner that answered exactly one window
+		// ago is still within it, and the next tick decides.
+		{
+			"starting task, silence exactly the offline timeout",
+			task_logger.TaskStartingStatus, nil,
+			&db.Runner{Touched: ago(offlineTimeout)},
+			RunnerTaskKeep,
+		},
+		{
+			"running task, silence exactly the fail timeout",
+			task_logger.TaskRunningStatus, ago(time.Hour),
+			&db.Runner{Touched: ago(taskFailTimeout)},
+			RunnerTaskKeep,
+		},
 		{
 			"running task, silence past recovery window",
 			task_logger.TaskRunningStatus, ago(time.Hour),

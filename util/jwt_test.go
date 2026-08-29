@@ -66,3 +66,61 @@ func TestRekeyJWTSigningKey_NoOptionStored(t *testing.T) {
 	require.NoError(t, err)
 	assert.Empty(t, slot)
 }
+
+// `vault rekey --old-key` exists for a key that is no longer in the keyset at
+// all, so the fallback must run exactly when the normal path failed and a key
+// was supplied.
+func TestRekeyJWTSigningKey_OldKeyFallback(t *testing.T) {
+	keyOption := genKey(0x02)
+	keyRetired := genKey(0x03)
+
+	t.Run("decrypts with the retired key", func(t *testing.T) {
+		Config = mustKeyset(t, keysCfg(map[string]string{"b": keyOption}, "b", ""), "", "")
+
+		store := newMockOptionStore()
+		underRetired, err := EncryptAESGCM([]byte("pem-bytes"), keyRetired)
+		require.NoError(t, err)
+		store.options[jwtSigningKeyOption] = underRetired
+
+		// The keyset cannot read it: only --old-key can.
+		_, err = Config.DecryptOption(underRetired)
+		require.Error(t, err)
+
+		require.NoError(t, RekeyJWTSigningKey(store, keyRetired))
+
+		slot, err := CheckJWTSigningKey(store)
+		require.NoError(t, err)
+		assert.Equal(t, "active:"+keyID(keyOption), slot)
+	})
+
+	t.Run("is not consulted when the keyset already reads the value", func(t *testing.T) {
+		Config = mustKeyset(t, keysCfg(map[string]string{"b": keyOption}, "b", ""), "", "")
+
+		store := newMockOptionStore()
+		current, err := Config.EncryptOption([]byte("pem-bytes"))
+		require.NoError(t, err)
+		store.options[jwtSigningKeyOption] = current
+
+		// A stale --old-key must not be tried against a value that decrypted.
+		require.NoError(t, RekeyJWTSigningKey(store, keyRetired))
+
+		// The ciphertext itself changes on every pass (GCM draws a fresh nonce),
+		// so what has to hold is that the plaintext survived.
+		plain, err := Config.DecryptOption(store.options[jwtSigningKeyOption])
+		require.NoError(t, err)
+		assert.Equal(t, "pem-bytes", string(plain))
+	})
+
+	t.Run("reports a value no key can read", func(t *testing.T) {
+		Config = mustKeyset(t, keysCfg(map[string]string{"b": keyOption}, "b", ""), "", "")
+
+		store := newMockOptionStore()
+		underRetired, err := EncryptAESGCM([]byte("pem-bytes"), keyRetired)
+		require.NoError(t, err)
+		store.options[jwtSigningKeyOption] = underRetired
+
+		err = RekeyJWTSigningKey(store, "")
+
+		assert.ErrorContains(t, err, "decrypt signing key for rekey")
+	})
+}

@@ -77,3 +77,42 @@ func TestLdapProvider_GetMappings_DefaultsWhenNil(t *testing.T) {
 	assert.Equal(t, "uid", m.UID)
 	assert.Equal(t, "cn", m.CN)
 }
+
+// Order is the field an administrator sets to control the login tabs; the ID is
+// only the tie-break. A sort that consulted the ID first would look correct
+// whenever the two agree, so this fixture makes them disagree.
+func TestActiveLdapProviders_OrderBeatsID(t *testing.T) {
+	conf := &ConfigType{
+		LdapProviders: map[string]LdapProvider{
+			"alpha": {Server: "alpha.example.com:389", Order: 2},
+			"beta":  {Server: "beta.example.com:389", Order: 1},
+		},
+	}
+
+	providers := conf.ActiveLdapProviders()
+
+	require.Len(t, providers, 2)
+	assert.Equal(t, "beta", providers[0].ID)
+	assert.Equal(t, "alpha", providers[1].ID)
+}
+
+// Providers are collected from a map, so their input order is random on every
+// call. Equal Order values therefore have to be resolved by a total order, or
+// the login page reshuffles between requests; one pass could pass by luck.
+func TestActiveLdapProviders_EqualOrderIsStable(t *testing.T) {
+	conf := &ConfigType{
+		LdapProviders: map[string]LdapProvider{
+			"gamma": {Server: "gamma.example.com:389"},
+			"alpha": {Server: "alpha.example.com:389"},
+			"beta":  {Server: "beta.example.com:389"},
+		},
+	}
+
+	for i := 0; i < 32; i++ {
+		providers := conf.ActiveLdapProviders()
+
+		require.Len(t, providers, 3)
+		assert.Equal(t, []string{"alpha", "beta", "gamma"},
+			[]string{providers[0].ID, providers[1].ID, providers[2].ID})
+	}
+}

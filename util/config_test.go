@@ -713,3 +713,143 @@ func TestTargetHostVarRuleAcceptsEmptyAndRejectsMalformed(t *testing.T) {
 		})
 	}
 }
+
+// A failed rule is reported with the offending value, which is fine for a port
+// and not fine for a credential. The name fragments below are the whole of the
+// masking rule, so each has to be able to trigger it on its own.
+func TestValidateMasksCredentialFields(t *testing.T) {
+	// The rule is the same everywhere; only the field name varies, and a field
+	// name cannot be a variable in a struct literal.
+	validationError := func(t *testing.T, fieldName, value string) string {
+		t.Helper()
+
+		typ := reflect.StructOf([]reflect.StructField{{
+			Name: fieldName,
+			Type: reflect.TypeOf(""),
+			Tag:  reflect.StructTag(`rule:"^[0-9]+$"`),
+		}})
+		probe := reflect.New(typ)
+		probe.Elem().Field(0).SetString(value)
+
+		err := validate(probe.Interface())
+		require.Error(t, err)
+		return err.Error()
+	}
+
+	for _, fieldName := range []string{"Password", "DbPassword", "Secret", "LdapSecret", "Key", "AccessKeyEncryption"} {
+		t.Run(fieldName+" is masked", func(t *testing.T) {
+			msg := validationError(t, fieldName, "s3cr3t-value")
+
+			assert.Contains(t, msg, "***")
+			assert.NotContains(t, msg, "s3cr3t-value")
+		})
+	}
+
+	t.Run("an ordinary field keeps its value", func(t *testing.T) {
+		msg := validationError(t, "Port", "not-a-port")
+
+		assert.Contains(t, msg, "not-a-port")
+		assert.NotContains(t, msg, "***")
+	})
+}
+
+func TestGetConfigValue_NestedPaths(t *testing.T) {
+	Config = NewConfigType()
+	Config.Port = "1337"
+	Config.SQLite = &DbConfig{Hostname: "192.168.0.1"}
+
+	t.Run("through a pointer field", func(t *testing.T) {
+		assert.Equal(t, "192.168.0.1", getConfigValue("SQLite.Hostname"))
+	})
+
+	// Descending into a scalar has to be reported as the bad path it is, not
+	// left to reflect to panic over one step later.
+	t.Run("through a scalar field", func(t *testing.T) {
+		assert.PanicsWithError(t, "got non-existent config attribute 'Port.Hostname'", func() {
+			getConfigValue("Port.Hostname")
+		})
+	})
+
+	t.Run("unknown leaf", func(t *testing.T) {
+		assert.PanicsWithError(t, "got non-existent config attribute 'SQLite.NotExistent'", func() {
+			getConfigValue("SQLite.NotExistent")
+		})
+	})
+}
+
+type defaultsProbeNested struct {
+	Value string `default:"from-tag"`
+}
+
+type defaultsProbe struct {
+	Plain     string `default:"from-tag"`
+	Nested    defaultsProbeNested
+	PtrNested *defaultsProbeNested
+	// Declared last on purpose: a field after the recursive descent proves the
+	// walk continued past it.
+	Trailing string `default:"from-tag"`
+	unset    string //nolint:unused // an unexported field must be skipped, not set
+}
+
+func TestLoadDefaultsToObject(t *testing.T) {
+	t.Run("fills empty fields", func(t *testing.T) {
+		probe := &defaultsProbe{}
+
+		require.NoError(t, loadDefaultsToObject(probe))
+
+		assert.Equal(t, "from-tag", probe.Plain)
+		assert.Equal(t, "from-tag", probe.Nested.Value)
+	})
+
+	// The config file is loaded before the defaults are, so a default that
+	// overwrote a set value would quietly discard configuration.
+	t.Run("keeps values that are already set", func(t *testing.T) {
+		probe := &defaultsProbe{Plain: "from-config"}
+
+		require.NoError(t, loadDefaultsToObject(probe))
+
+		assert.Equal(t, "from-config", probe.Plain)
+	})
+
+	// A non-nil pointer is not a zero value, so the field is only descended
+	// into because it points at a struct.
+	t.Run("descends into a struct behind a pointer", func(t *testing.T) {
+		probe := &defaultsProbe{PtrNested: &defaultsProbeNested{}}
+
+		require.NoError(t, loadDefaultsToObject(probe))
+
+		assert.Equal(t, "from-tag", probe.PtrNested.Value)
+		assert.Equal(t, "from-tag", probe.Trailing)
+	})
+
+	t.Run("leaves a nil pointer nil", func(t *testing.T) {
+		probe := &defaultsProbe{}
+
+		require.NoError(t, loadDefaultsToObject(probe))
+
+		assert.Nil(t, probe.PtrNested)
+	})
+}
+
+type assignProbeNested struct {
+	Items []string `json:"items"`
+}
+
+type assignProbe struct {
+	Nested assignProbeNested `json:"nested"`
+	Tail   string            `json:"tail"`
+}
+
+// A value rejected deep in the config tree has to reach the caller: swallowing
+// it would start the server with a field silently left at its default.
+func TestAssignMapToStruct_NestedError(t *testing.T) {
+	var probe assignProbe
+
+	err := AssignMapToStruct(map[string]any{
+		"nested": map[string]any{"items": 42},
+		"tail":   "unreached",
+	}, &probe)
+
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "Items")
+}
