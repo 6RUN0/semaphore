@@ -141,6 +141,43 @@ tasks:
     cmds:
       - go test -v -coverprofile=coverage.out ./...
 
+  test:dialects:
+    desc: Run the dialect tests against real MySQL and PostgreSQL in containers
+    summary: |
+      The snapshot store carries hand-written SQL, and SQLite accepts things a
+      real engine rejects: collation, LIKE ESCAPE and the width an indexed
+      varchar may have all differ. These tests run the same schema against the
+      engines from compose.test.yml.
+
+      The containers stay up afterwards, so a second run starts immediately.
+      Reset them with `task test:dialects:down`.
+    vars:
+      COMPOSE: docker compose -f compose.test.yml
+      # Refusing to skip is the point: a skipped test still reports ok, so an
+      # environment that stopped offering the databases would look exactly like
+      # one where these tests pass.
+      REQUIRED: SEMAPHORE_TEST_DIALECTS_REQUIRED=1
+      SUITE: go test ./db/sql/ -count=1 -v
+    cmds:
+      - "{{ .COMPOSE }} up -d --wait mysql postgres postgres-next"
+      - >-
+        {{ .REQUIRED }}
+        SEMAPHORE_TEST_MYSQL='root:test@127.0.0.1:13306/semaphore_test'
+        {{ .SUITE }} -run TestInventorySnapshotOnDialectMySQL
+      - >-
+        {{ .REQUIRED }}
+        SEMAPHORE_TEST_POSTGRES='postgres:test@127.0.0.1:15432/semaphore_test?sslmode=disable'
+        {{ .SUITE }} -run TestInventorySnapshotOnDialectPostgres
+      - >-
+        {{ .REQUIRED }}
+        SEMAPHORE_TEST_POSTGRES='postgres:test@127.0.0.1:15433/semaphore_test?sslmode=disable'
+        {{ .SUITE }} -run TestInventorySnapshotOnDialectPostgres
+
+  test:dialects:down:
+    desc: Remove the dialect test databases, including their data
+    cmds:
+      - docker compose -f compose.test.yml --profile timescale down -v
+
   test:mutation:deps:
     desc: Installs gremlins which is required by mutation testing
     vars:

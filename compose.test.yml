@@ -1,0 +1,83 @@
+# Database engines for the dialect tests in db/sql/inventory_snapshot_dialect_test.go.
+#
+# Started by `task test:dialects`, which hands the DSNs below to the tests
+# through SEMAPHORE_TEST_MYSQL and SEMAPHORE_TEST_POSTGRES. Nothing else reads
+# this file; the application never runs against it.
+#
+# The ports are deliberately not the default ones, so a MySQL or PostgreSQL
+# already listening on this machine keeps its own port.
+#
+# The containers are meant to stay up between runs: db.Migrate skips migrations
+# it has already applied, and every assertion is scoped to an inventory the run
+# creates, so a warm database is as good as a fresh one and saves the startup
+# wait. `task test:dialects:down` throws them away.
+
+name: semaphore-test
+
+services:
+  mysql:
+    # The engine the CI build-local job offers, so that a local pass and a CI
+    # pass mean the same thing.
+    image: mysql:8
+    environment:
+      MYSQL_ROOT_PASSWORD: test
+      MYSQL_DATABASE: semaphore_test
+    ports:
+      - "13306:3306"
+    healthcheck:
+      test: ["CMD", "mysqladmin", "ping", "-h", "localhost", "-ptest"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  postgres:
+    # Also mirrors CI.
+    image: postgres:16
+    environment:
+      POSTGRES_PASSWORD: test
+      POSTGRES_DB: semaphore_test
+    ports:
+      - "15432:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  postgres-next:
+    # The current major. The dialect tests exist for engine-specific behaviour
+    # (collation, LIKE ESCAPE, the width an indexed varchar may have), which is
+    # exactly the kind of thing a major bump changes, so the newest release is
+    # worth a run even though CI does not offer it yet.
+    image: postgres:18
+    environment:
+      POSTGRES_PASSWORD: test
+      POSTGRES_DB: semaphore_test
+    ports:
+      - "15433:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  # Opt-in: `docker compose -f compose.test.yml --profile timescale up -d --wait`.
+  # TimescaleDB is PostgreSQL plus an extension, and the extension only changes
+  # behaviour for hypertables, which this schema does not create — so it is not
+  # part of `task test:dialects`. It is kept here for the one question plain
+  # PostgreSQL cannot answer: whether the migrations and the snapshot queries
+  # still work on an installation whose extension owns schemas and search_path.
+  # The -oss tag is the Apache-licensed build.
+  timescale:
+    image: timescale/timescaledb:2.29.2-pg18-oss
+    profiles: [timescale]
+    environment:
+      POSTGRES_PASSWORD: test
+      POSTGRES_DB: semaphore_test
+    ports:
+      - "15434:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres"]
+      interval: 5s
+      timeout: 5s
+      retries: 10

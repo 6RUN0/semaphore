@@ -34,6 +34,7 @@
 # Root files.
 !/api-docs.yml
 !/CODE_OF_CONDUCT.md
+!/compose.test.yml
 !/config.schema.yaml
 !/CONTRIBUTING.md
 !/docs
