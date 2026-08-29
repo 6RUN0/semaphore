@@ -1,62 +1,87 @@
-gin-bin
-build/
-/test/mcp/*/artifacts/
-/certs/
-web/public/js/bundle.js
-web/public/css/*.*
-web/public/html/**/*.*
-web/public/fonts/*.*
-web/.nyc_output
-api/public/**/*
-/server.json
-/config.json
-/config.yml
-/config.yaml
-/config-secondary.json
-/config.runner.json
-/config.runner.token
-/config.runner.key
-/runner-config.json
-/runner-token.txt
-/runner-key.pem
-/runner.json
-/runner.token
-/runner.key
-/runner-old.token
-/runner-old.key
-/runner.registration_token
-/.dredd/config.json
-/database.sqlite*
-.DS_Store
-/backup.json
-node_modules/
+# Deny everything, then re-include what belongs.
+#
+# A denylist fails open: every new editor, agent or analysis tool leaks its
+# working directory into the repository until someone remembers to name it, and
+# every line naming one is a public inventory of the toolchain. An allowlist
+# fails closed instead — an unknown path is simply not there.
+#
+# `/*` is anchored to the root and so misses a dotfile inside an allowed
+# directory; `.*` is unanchored and closes that at every depth. Both denials stay
+# above the negations, because the last matching pattern wins.
+#
+# Acceptance check — silence means the allowlist covers every tracked file:
+#   git ls-files | git check-ignore --stdin
+/*
+.*
 
-/.idea/
-/semaphore.iml
-/bin/
+# Source tree.
+!/AGENTS/
+!/api/
+!/cli/
+!/db/
+!/db_lib/
+!/deployment/
+!/examples/
+!/hook_helpers/
+!/pkg/
+!/pro/
+!/pro_interfaces/
+!/services/
+!/test/
+!/util/
+!/web/
 
-/vendor/
-/coverage.out
-/public/package-lock.json
+# Root files.
+!/api-docs.yml
+!/CODE_OF_CONDUCT.md
+!/config.schema.yaml
+!/CONTRIBUTING.md
+!/docs
+!/go.mod
+!/go.sum
+!/LICENSE
+!/package-lock.json
+!/qodana.yaml
+!/README.md
+!/renovate.json
+!/SECURITY.md
+!/Taskfile.yml
+!/THIRD-PARTY-LICENSES.md
+
+# Dot-entries, one by one: `.*` above hides them at every depth. `.gitignore`
+# itself has to be here or `git add` on it needs -f.
+!/.codacy.yml
+!/.cursorignore
+!/.devcontainer/
+!/.dockerignore
+!/.dredd/
+!/.github/
+!/.gitignore
+!/.gitmodules
+!/.golangci.yml
+!/.goreleaser.yml
+
+# Dot-entries nested inside the allowed tree.
+!/examples/authentik_ldap/.gitignore
+!/test/e2e/.env.example
+!/test/e2e/.gitignore
+!/test/mcp/e2e/.gitignore
+!/web/.browserslistrc
+!/web/.editorconfig
+!/web/.env.example
+!/web/.eslintrc.js
 !.gitkeep
 
-.dredd/compiled_hooks
-.dredd/compiled_hooks.exe
-
+# Generated and local content inside the allowed tree. Last, because a directory
+# re-included above brings its build output back with it.
+build/
+node_modules/
 __debug_bin*
-.task/
-/web/.env
-/.venv/
-
-/events.log
-/tasks.log
-/task_results.log
-/pro_impl/
-/go.work.x
-/go.work
-/go.work.sum
-/.licenses-cache
-/*-config.yaml
-/*-config.yml
-/*-config.config
-/*.sqlite*
+/api/public/**/*
+/web/public/js/bundle.js
+/web/public/css/*.*
+/web/public/html/**/*.*
+/web/public/fonts/*.*
+/test/mcp/*/artifacts/
+/.dredd/compiled_hooks
+/.dredd/compiled_hooks.exe
