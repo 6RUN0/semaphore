@@ -21,6 +21,7 @@
 !/db/
 !/db_lib/
 !/deployment/
+!/docs/
 !/examples/
 !/hook_helpers/
 !/pkg/
@@ -37,7 +38,6 @@
 !/compose.test.yml
 !/config.schema.yaml
 !/CONTRIBUTING.md
-!/docs
 !/go.mod
 !/go.sum
 !/LICENSE
@@ -52,6 +52,14 @@
 # Dot-entries, one by one: `.*` above hides them at every depth. `.gitignore`
 # itself has to be here or `git add` on it needs -f.
 !/.codacy.yml
+!/.claude/
+# The agent instructions and the project's own skills are shared content; the
+# rest of .claude/ is one workstation's local state. Denying the directory's
+# contents rather than the directory itself is what lets the two lines below
+# re-include anything at all.
+/.claude/*
+!/.claude/CLAUDE.md
+!/.claude/skills/
 !/.cursorignore
 !/.devcontainer/
 !/.dockerignore

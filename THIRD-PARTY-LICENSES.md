@@ -2,14 +2,14 @@
 
 Semaphore UI is built on the work of many open-source projects. This document identifies every third-party component distributed with Semaphore UI, in compliance with the attribution requirements of the respective licenses and with §3.6 of our Master Service Agreement (identification of open-source components by name, version, and license type).
 
-_Generated on **2026-06-13 15:49 UTC** by `scripts/collect_licenses.sh`._
+_Generated on **2026-06-13 15:49 UTC** by `.claude/skills/semaphore-third-party-licenses/scripts/collect_licenses.sh`._
 
 To regenerate this file, run:
 
 ```bash
-scripts/collect_licenses.sh
-scripts/check_policy.py .licenses-cache/
-scripts/generate_md.py .licenses-cache/ > THIRD-PARTY-LICENSES.md
+.claude/skills/semaphore-third-party-licenses/scripts/collect_licenses.sh
+.claude/skills/semaphore-third-party-licenses/scripts/check_policy.py .licenses-cache/
+.claude/skills/semaphore-third-party-licenses/scripts/generate_md.py .licenses-cache/ > THIRD-PARTY-LICENSES.md
 ```
 
 ## Summary
