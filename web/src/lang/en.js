@@ -7,6 +7,8 @@ export default {
   editSchedule: 'Edit Schedule',
   backup: 'Backup Project',
   downloadTheProjectBackupFile: 'Download the project backup file.',
+  backupIncludeIntegrationAliases: 'Include webhook aliases',
+  backupIncludeIntegrationAliasesHint: 'Aliases are the secret of the webhook URLs. Include them only to move the project to another instance and keep its webhook URLs.',
   restoreProject: 'Restore Project...',
   incorrectUsrPwd: 'Incorrect login or password',
   askDeleteUser: 'Do you really want to delete this user?',

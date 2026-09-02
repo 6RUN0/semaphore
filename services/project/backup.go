@@ -253,9 +253,11 @@ func (b *BackupDB) load(projectID int, store db.Store, workflowStore db.Workflow
 		return
 	}
 
-	b.integrationProjAliases, err = store.GetIntegrationAliases(projectID, nil)
-	if err != nil {
-		return
+	if b.includeIntegrationAliases {
+		b.integrationProjAliases, err = store.GetIntegrationAliases(projectID, nil)
+		if err != nil {
+			return
+		}
 	}
 
 	b.integrations, err = store.GetIntegrations(projectID, db.RetrieveQueryParams{}, true)
@@ -268,9 +270,11 @@ func (b *BackupDB) load(projectID int, store db.Store, workflowStore db.Workflow
 	b.integrationExtractValues = make(map[int][]db.IntegrationExtractValue)
 	for _, o := range b.integrations {
 
-		b.integrationAliases[o.ID], err = store.GetIntegrationAliases(projectID, &o.ID)
-		if err != nil {
-			return
+		if b.includeIntegrationAliases {
+			b.integrationAliases[o.ID], err = store.GetIntegrationAliases(projectID, &o.ID)
+			if err != nil {
+				return
+			}
 		}
 		b.integrationMatchers[o.ID], err = store.GetIntegrationMatchers(projectID, db.RetrieveQueryParams{}, o.ID)
 		if err != nil {
@@ -581,8 +585,17 @@ func (b *BackupDB) format() (*BackupFormat, error) {
 	}, nil
 }
 
-func GetBackup(projectID int, store db.Store, workflowStore db.WorkflowManager) (*BackupFormat, error) {
-	backup := BackupDB{}
+// BackupOptions selects what a backup carries beyond the project
+// configuration.
+type BackupOptions struct {
+	// IncludeIntegrationAliases exports webhook aliases. An alias is the
+	// whole secret of the public webhook route, so it stays out of a backup
+	// unless the caller asks for a transfer that must keep webhook URLs.
+	IncludeIntegrationAliases bool
+}
+
+func GetBackup(projectID int, store db.Store, workflowStore db.WorkflowManager, opts BackupOptions) (*BackupFormat, error) {
+	backup := BackupDB{includeIntegrationAliases: opts.IncludeIntegrationAliases}
 	if err := backup.load(projectID, store, workflowStore); err != nil {
 		return nil, err
 	}

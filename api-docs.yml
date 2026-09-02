@@ -2247,6 +2247,17 @@ paths:
       tags:
         - project
       summary: Backup A Project
+      description: |
+        Webhook aliases are left out unless include_integration_aliases is set:
+        an alias is the secret of the public webhook URL. On restore, an alias
+        already in use on the instance is replaced by a new random one.
+      parameters:
+        - name: include_integration_aliases
+          in: query
+          required: false
+          type: boolean
+          default: false
+          description: Include webhook aliases of the project and its integrations
       responses:
         200:
           description: Backup

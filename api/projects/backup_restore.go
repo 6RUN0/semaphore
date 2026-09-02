@@ -29,7 +29,11 @@ func (c *BackupController) GetBackup(w http.ResponseWriter, r *http.Request) {
 
 	store := helpers.Store(r)
 
-	backup, err := projectService.GetBackup(project.ID, store, c.workflowStore)
+	opts := projectService.BackupOptions{
+		IncludeIntegrationAliases: r.URL.Query().Get("include_integration_aliases") == "true",
+	}
+
+	backup, err := projectService.GetBackup(project.ID, store, c.workflowStore, opts)
 
 	if err != nil {
 		helpers.WriteError(w, err)

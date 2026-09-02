@@ -14,6 +14,9 @@ type projectExportArgs struct {
 	projectID   int
 	projectName string
 	file        string
+	// includeIntegrationAliases exports webhook aliases; see
+	// project.BackupOptions for why they are off by default.
+	includeIntegrationAliases bool
 }
 
 var targetProjectExportArgs projectExportArgs
@@ -22,6 +25,8 @@ func init() {
 	projectExportCmd.PersistentFlags().IntVar(&targetProjectExportArgs.projectID, "project-id", 0, "Project ID to export")
 	projectExportCmd.PersistentFlags().StringVar(&targetProjectExportArgs.projectName, "project-name", "", "Project name to export")
 	projectExportCmd.PersistentFlags().StringVar(&targetProjectExportArgs.file, "file", "", "Output file path (default: stdout)")
+	projectExportCmd.PersistentFlags().BoolVar(&targetProjectExportArgs.includeIntegrationAliases, "include-integration-aliases", false,
+		"Include webhook aliases; they are the secret of the webhook URLs, so use only to move the project to another instance")
 	projectCmd.AddCommand(projectExportCmd)
 }
 
@@ -75,7 +80,9 @@ var projectExportCmd = &cobra.Command{
 		}
 
 		workflowStore := proFactory.NewWorkflowStore(store)
-		backup, err := projectService.GetBackup(projectID, store, workflowStore)
+		backup, err := projectService.GetBackup(projectID, store, workflowStore, projectService.BackupOptions{
+			IncludeIntegrationAliases: targetProjectExportArgs.includeIntegrationAliases,
+		})
 		if err != nil {
 			fmt.Printf("Failed to create backup: %v\n", err)
 			os.Exit(1)

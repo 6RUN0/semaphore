@@ -67,7 +67,7 @@ func TestBackupProject(t *testing.T) {
 	})
 	assert.NoError(t, err)
 
-	backup, err := GetBackup(proj.ID, store, proFactory.NewWorkflowStore(store))
+	backup, err := GetBackup(proj.ID, store, proFactory.NewWorkflowStore(store), BackupOptions{})
 	assert.NoError(t, err)
 	assert.Equal(t, proj.ID, backup.Meta.ID)
 
@@ -136,7 +136,7 @@ func TestBackup_BackupSecretStorage(t *testing.T) {
 	})
 	assert.NoError(t, err)
 
-	backup, err := GetBackup(proj.ID, store, proFactory.NewWorkflowStore(store))
+	backup, err := GetBackup(proj.ID, store, proFactory.NewWorkflowStore(store), BackupOptions{})
 	assert.NoError(t, err)
 	assert.Equal(t, proj.ID, backup.Meta.ID)
 	backup.Meta.Name = "Test 1234"
@@ -391,6 +391,106 @@ func TestBackup_RestoreDropsSecretSurveyVarDefault(t *testing.T) {
 	assert.Equal(t, "db", templates[0].SurveyVars[1].DefaultValue.String())
 	require.NotNil(t, templates[0].SurveyVarsJSON)
 	assert.NotContains(t, *templates[0].SurveyVarsJSON, "hunter2")
+}
+
+// newBackupTestProject creates a project with a template and an integration
+// on it, the minimum an integration alias can hang off.
+func newBackupTestProject(t *testing.T, store db.Store, name string) (db.Project, db.Integration) {
+	t.Helper()
+
+	proj, err := store.CreateProject(db.Project{Name: name})
+	require.NoError(t, err)
+	key, err := store.CreateAccessKey(db.AccessKey{ProjectID: &proj.ID, Type: db.AccessKeyNone, Name: "none"})
+	require.NoError(t, err)
+	repo, err := store.CreateRepository(db.Repository{
+		ProjectID: proj.ID, SSHKeyID: key.ID, Name: "repo", GitURL: "git@example.com:t/t", GitBranch: "main",
+	})
+	require.NoError(t, err)
+	tpl, err := store.CreateTemplate(db.Template{Name: "tpl", Playbook: "p.yml", ProjectID: proj.ID, RepositoryID: repo.ID})
+	require.NoError(t, err)
+	integration, err := store.CreateIntegration(db.Integration{Name: "hook", ProjectID: proj.ID, TemplateID: tpl.ID})
+	require.NoError(t, err)
+
+	return proj, integration
+}
+
+// TestGetBackup_IntegrationAliasesOnlyOnRequest pins that a backup carries
+// webhook aliases only when asked for: an alias is the whole secret of the
+// public webhook route, and a backup file travels as configuration.
+func TestGetBackup_IntegrationAliasesOnlyOnRequest(t *testing.T) {
+	util.Config = &util.ConfigType{TmpPath: "/tmp"}
+	store := sql.InitConfigCreateTestStore()
+	workflowStore := proFactory.NewWorkflowStore(store)
+
+	proj, integration := newBackupTestProject(t, store, "aliases-export")
+	_, err := store.CreateIntegrationAlias(db.IntegrationAlias{Alias: "projectalias0001", ProjectID: proj.ID})
+	require.NoError(t, err)
+	_, err = store.CreateIntegrationAlias(db.IntegrationAlias{
+		Alias: "hookalias0000001", ProjectID: proj.ID, IntegrationID: &integration.ID,
+	})
+	require.NoError(t, err)
+
+	backup, err := GetBackup(proj.ID, store, workflowStore, BackupOptions{})
+	require.NoError(t, err)
+	require.Len(t, backup.Integration, 1)
+	assert.Empty(t, backup.IntegrationAliases)
+	assert.Empty(t, backup.Integration[0].Aliases)
+	str, err := backup.Marshal()
+	require.NoError(t, err)
+	assert.NotContains(t, str, "projectalias0001")
+	assert.NotContains(t, str, "hookalias0000001")
+
+	backup, err = GetBackup(proj.ID, store, workflowStore, BackupOptions{IncludeIntegrationAliases: true})
+	require.NoError(t, err)
+	require.Len(t, backup.Integration, 1)
+	assert.Equal(t, []string{"projectalias0001"}, backup.IntegrationAliases)
+	assert.Equal(t, []string{"hookalias0000001"}, backup.Integration[0].Aliases)
+}
+
+// TestBackup_RestoreReplacesTakenIntegrationAlias pins that restoring into
+// an instance where the alias is already in use still leaves the webhook
+// reachable: the alias is unique across projects, and a failed insert used to
+// be dropped silently, leaving the integration with no alias at all.
+func TestBackup_RestoreReplacesTakenIntegrationAlias(t *testing.T) {
+	util.Config = &util.ConfigType{TmpPath: "/tmp"}
+	store := sql.InitConfigCreateTestStore()
+	workflowStore := proFactory.NewWorkflowStore(store)
+
+	proj, integration := newBackupTestProject(t, store, "aliases-source")
+	_, err := store.CreateIntegrationAlias(db.IntegrationAlias{Alias: "projectalias0002", ProjectID: proj.ID})
+	require.NoError(t, err)
+	_, err = store.CreateIntegrationAlias(db.IntegrationAlias{
+		Alias: "hookalias0000002", ProjectID: proj.ID, IntegrationID: &integration.ID,
+	})
+	require.NoError(t, err)
+
+	backup, err := GetBackup(proj.ID, store, workflowStore, BackupOptions{IncludeIntegrationAliases: true})
+	require.NoError(t, err)
+	backup.Meta.Name = "aliases-copy"
+
+	user, err := store.CreateUser(db.UserWithPwd{
+		Pwd:  "3412341234123",
+		User: db.User{Username: "aliasrestore", Name: "Test", Email: "aliasrestore@example.com", Admin: true},
+	})
+	require.NoError(t, err)
+
+	restored, err := backup.Restore(user, store, workflowStore)
+	require.NoError(t, err)
+
+	projectAliases, err := store.GetIntegrationAliases(restored.ID, nil)
+	require.NoError(t, err)
+	require.Len(t, projectAliases, 1)
+	assert.NotEmpty(t, projectAliases[0].Alias)
+	assert.NotEqual(t, "projectalias0002", projectAliases[0].Alias)
+
+	integrations, err := store.GetIntegrations(restored.ID, db.RetrieveQueryParams{}, false)
+	require.NoError(t, err)
+	require.Len(t, integrations, 1)
+	hookAliases, err := store.GetIntegrationAliases(restored.ID, &integrations[0].ID)
+	require.NoError(t, err)
+	require.Len(t, hookAliases, 1)
+	assert.NotEmpty(t, hookAliases[0].Alias)
+	assert.NotEqual(t, "hookalias0000002", hookAliases[0].Alias)
 }
 
 // TestBackup_Workflow moved to pro_impl/db/sql/backup_workflow_test.go because

@@ -450,15 +450,31 @@ func (e BackupIntegration) Restore(b *BackupDB) error {
 	}
 
 	for _, a := range e.Aliases {
-		alias := db.IntegrationAlias{
+		err := b.createIntegrationAlias(db.IntegrationAlias{
 			Alias:         a,
 			ProjectID:     b.meta.ID,
 			IntegrationID: &newIntegration.ID,
+		})
+		if err != nil {
+			return err
 		}
-		_, _ = b.store.CreateIntegrationAlias(alias)
 	}
 
 	return nil
+}
+
+// createIntegrationAlias inserts the alias from the backup and, when that
+// insert is refused, a fresh random one. Aliases are unique across the whole
+// instance, so a backup restored next to its source, or on an instance that
+// already holds the alias, would otherwise leave the webhook unreachable.
+func (b *BackupDB) createIntegrationAlias(alias db.IntegrationAlias) error {
+	if _, err := b.store.CreateIntegrationAlias(alias); err == nil {
+		return nil
+	}
+
+	alias.Alias = random.String(16)
+	_, err := b.store.CreateIntegrationAlias(alias)
+	return err
 }
 
 func (e BackupRunner) Verify(backup *BackupFormat) error {
@@ -693,12 +709,14 @@ func (backup *BackupFormat) Restore(user db.User, store db.Store, workflowStore 
 		}
 	}
 
-	for _, o := range backup.IntegrationAliases {
-		alias := db.IntegrationAlias{
+	for i, o := range backup.IntegrationAliases {
+		err := b.createIntegrationAlias(db.IntegrationAlias{
 			Alias:     o,
 			ProjectID: b.meta.ID,
+		})
+		if err != nil {
+			return nil, fmt.Errorf("error at integration_aliases[%d]: %s", i, err.Error())
 		}
-		_, _ = b.store.CreateIntegrationAlias(alias)
 	}
 
 	for i, o := range backup.Schedules {

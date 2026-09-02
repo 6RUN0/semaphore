@@ -7,6 +7,8 @@ export default {
   editSchedule: 'Редактировать расписание',
   backup: 'Резервное копирование проекта',
   downloadTheProjectBackupFile: 'Скачать файл резервной копии проекта.',
+  backupIncludeIntegrationAliases: 'Включить алиасы вебхуков',
+  backupIncludeIntegrationAliasesHint: 'Алиас является секретом URL вебхука. Включайте их только для переноса проекта на другой инстанс с сохранением URL вебхуков.',
   restoreProject: 'Восстановить проект...',
   incorrectUsrPwd: 'Неверный логин или пароль',
   askDeleteUser: 'Вы действительно хотите удалить этого пользователя?',

@@ -14,6 +14,10 @@ type BackupDB struct {
 	environments []db.Environment
 	schedules    []db.Schedule
 
+	// includeIntegrationAliases is set from BackupOptions; aliases are not
+	// read from the store at all when it is off.
+	includeIntegrationAliases bool
+
 	integrationProjAliases   []db.IntegrationAlias
 	integrations             []db.Integration
 	integrationAliases       map[int][]db.IntegrationAlias

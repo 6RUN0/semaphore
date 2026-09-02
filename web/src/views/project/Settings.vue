@@ -90,6 +90,15 @@
             <div style="font-size: 14px;">
               {{ $t('downloadTheProjectBackupFile') }}
             </div>
+            <v-checkbox
+              v-model="backupIncludeIntegrationAliases"
+              :label="$t('backupIncludeIntegrationAliases')"
+              :hint="$t('backupIncludeIntegrationAliasesHint')"
+              persistent-hint
+              dense
+              class="mt-1"
+              data-testid="settings-backupIncludeIntegrationAliases"
+            />
           </v-col>
         </v-row>
       </div>
@@ -183,6 +192,7 @@ export default {
     return {
       deleteProjectDialog: null,
       backupProgress: false,
+      backupIncludeIntegrationAliases: false,
       clearCacheProgress: false,
       testNotificationProgress: false,
     };
@@ -268,6 +278,13 @@ export default {
       }
     },
 
+    // Webhook aliases are the secret of the public webhook route, so the
+    // server leaves them out unless the download asks for them.
+    backupUrl() {
+      const url = `/api/project/${this.projectId}/backup`;
+      return this.backupIncludeIntegrationAliases ? `${url}?include_integration_aliases=true` : url;
+    },
+
     async backupProject() {
       this.backupProgress = true;
       await delay(1000);
@@ -275,7 +292,7 @@ export default {
       try {
         const backup = await axios({
           method: 'get',
-          url: `/api/project/${this.projectId}/backup`,
+          url: this.backupUrl(),
           transformResponse: (res) => res, // Necessary to not parse json
           responseType: 'json',
         });
