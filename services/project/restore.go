@@ -26,7 +26,9 @@ func verifyDuplicate[T BackupEntry](name string, items []T) error {
 		if o.GetName() == name {
 			n++
 		}
-		if n > 2 {
+		// The entity being verified is itself in items, so the second match
+		// is the first real duplicate.
+		if n > 1 {
 			return fmt.Errorf("%s is duplicate", name)
 		}
 	}
