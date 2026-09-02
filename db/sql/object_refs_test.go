@@ -74,5 +74,9 @@ func TestReferenceQueriesForPrune(t *testing.T) {
 		refs, err = store.GetTemplateVaultRefsByKey(proj.ID, key.ID)
 		require.NoError(t, err)
 		assert.Empty(t, refs)
+
+		refs, err = store.GetTemplateVaultRefsByKey(other.ID, vaultKey.ID)
+		require.NoError(t, err)
+		assert.Empty(t, refs)
 	})
 }
