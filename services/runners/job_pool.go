@@ -687,6 +687,12 @@ func (p *JobPool) tryRegisterRunner(configFilePath *string) (ok bool) {
 
 	if util.Config.Runner.TokenFile != "" {
 		err = os.WriteFile(util.Config.Runner.TokenFile, []byte(res.Token), 0644)
+		if err != nil {
+			log.WithError(err).WithFields(log.Fields{
+				"context": "registration",
+			}).Error("con't save runner token")
+			return
+		}
 	} else {
 		if configFilePath == nil {
 			log.WithError(fmt.Errorf("config file path required")).WithFields(log.Fields{
@@ -704,7 +710,9 @@ func (p *JobPool) tryRegisterRunner(configFilePath *string) (ok bool) {
 			return
 		}
 
-		config := util.ConfigType{}
+		config := util.ConfigType{
+			Runner: &util.RunnerConfig{},
+		}
 		err = json.Unmarshal(configFileBuffer, &config)
 		if err != nil {
 			log.WithError(err).WithFields(log.Fields{
