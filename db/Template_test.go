@@ -160,7 +160,12 @@ func TestValidateSurveyVar(t *testing.T) {
 		{"int: scalar ok", SurveyVar{Name: "V", Type: SurveyVarInt, DefaultValue: strVal("42")}, ""},
 		{"int: array of multi rejected", SurveyVar{Name: "V", Type: SurveyVarInt, DefaultValue: arrVal("1", "2")}, "must be a string for type"},
 		{"text: scalar ok", SurveyVar{Name: "V", Type: SurveyVarText, DefaultValue: strVal("long text")}, ""},
-		{"secret: scalar ok", SurveyVar{Name: "V", Type: SurveyVarText, DefaultValue: strVal("s3cr3t")}, ""},
+		// A default of a secret variable would sit in the template row and in
+		// every template read as plain text.
+		{"secret: nil default ok", SurveyVar{Name: "V", Type: SurveyVarSecret}, ""},
+		{"secret: empty default ok", SurveyVar{Name: "V", Type: SurveyVarSecret, DefaultValue: &SurveyVarDefaultValue{}}, ""},
+		{"secret: scalar rejected", SurveyVar{Name: "V", Type: SurveyVarSecret, DefaultValue: strVal("s3cr3t")}, "not allowed for secret"},
+		{"secret: array rejected", SurveyVar{Name: "V", Type: SurveyVarSecret, DefaultValue: arrVal("s3cr3t")}, "not allowed for secret"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {

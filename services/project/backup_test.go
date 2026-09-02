@@ -320,6 +320,79 @@ func TestBackup_RestoreScheduleWithoutTaskParams(t *testing.T) {
 	assert.True(t, found, "restored schedule should be persisted")
 }
 
+// TestBackup_RestoreDropsSecretSurveyVarDefault pins the restore side of
+// TestBackupFormat_DropsSecretSurveyVarDefault: a backup written before the
+// default was refused on secret variables still restores, and the default is
+// dropped rather than stored as plain text.
+func TestBackup_RestoreDropsSecretSurveyVarDefault(t *testing.T) {
+	util.Config = &util.ConfigType{
+		TmpPath: "/tmp",
+	}
+
+	store := sql.InitConfigCreateTestStore()
+
+	payload := `{
+  "environments": [],
+  "integration_aliases": [],
+  "integrations": [],
+  "inventories": [],
+  "keys": [{"name": "noop", "owner": "", "type": "none"}],
+  "meta": {"alert": false, "max_parallel_tasks": 0, "name": "Restored Project", "type": ""},
+  "repositories": [
+    {"git_branch": "master", "git_url": "git@example.com:test/test.git", "name": "Test Repo", "ssh_key": "noop"}
+  ],
+  "roles": [],
+  "runners": [],
+  "schedules": [],
+  "secret_storages": [],
+  "templates": [
+    {
+      "name": "Test Template",
+      "playbook": "test.yml",
+      "repository": "Test Repo",
+      "roles": [],
+      "type": "",
+      "vaults": [],
+      "view": null,
+      "environments": [],
+      "survey_vars": [
+        {"name": "pw", "type": "secret", "default_value": "hunter2"},
+        {"name": "host", "default_value": "db"}
+      ]
+    }
+  ],
+  "views": []
+}`
+
+	restoredBackup := &BackupFormat{}
+	require.NoError(t, restoredBackup.Unmarshal(payload))
+
+	user, err := store.CreateUser(db.UserWithPwd{
+		Pwd: "3412341234123",
+		User: db.User{
+			Username: "secretrestore",
+			Name:     "Test",
+			Email:    "secretrestore@example.com",
+			Admin:    true,
+		},
+	})
+	require.NoError(t, err)
+
+	restoredProj, err := restoredBackup.Restore(user, store, proFactory.NewWorkflowStore(store))
+	require.NoError(t, err)
+
+	templates, err := store.GetTemplates(restoredProj.ID, db.TemplateFilter{}, db.RetrieveQueryParams{})
+	require.NoError(t, err)
+	require.Len(t, templates, 1)
+	require.Len(t, templates[0].SurveyVars, 2)
+
+	assert.Nil(t, templates[0].SurveyVars[0].DefaultValue)
+	require.NotNil(t, templates[0].SurveyVars[1].DefaultValue)
+	assert.Equal(t, "db", templates[0].SurveyVars[1].DefaultValue.String())
+	require.NotNil(t, templates[0].SurveyVarsJSON)
+	assert.NotContains(t, *templates[0].SurveyVarsJSON, "hunter2")
+}
+
 // TestBackup_Workflow moved to pro_impl/db/sql/backup_workflow_test.go because
 // workflow persistence is a Pro feature requiring the real workflow store
 // (the open-source build only has the no-op stub).
@@ -386,6 +459,54 @@ func TestBackupFormat_TemplateWithoutRepositoryIsAnError(t *testing.T) {
 
 	_, err := b.format()
 	assert.ErrorContains(t, err, "orphan")
+}
+
+// TestBackupFormat_SecretStoragesGetUniqueNames pins that two storages with
+// one name export under distinct names: the table has no unique constraint
+// on the name, while Verify on restore refuses the duplicate.
+func TestBackupFormat_SecretStoragesGetUniqueNames(t *testing.T) {
+	b := BackupDB{
+		meta: db.Project{ID: 1, Name: "p"},
+		secretStorages: []db.SecretStorage{
+			{ID: 1, Name: "vault", Type: "vault"},
+			{ID: 2, Name: "vault", Type: "vault"},
+		},
+		templateRoles: map[int][]db.TemplateRolePerm{},
+	}
+
+	b.makeUniqueNames()
+
+	format, err := b.format()
+	require.NoError(t, err)
+	require.Len(t, format.SecretStorages, 2)
+	assert.NotEqual(t, format.SecretStorages[0].Name, format.SecretStorages[1].Name)
+	assert.NoError(t, format.Verify())
+}
+
+// TestBackupFormat_DropsSecretSurveyVarDefault pins that a stored default
+// of a secret survey variable never reaches the backup file, whatever the
+// row holds: validation rejects it on save, rows written earlier still exist.
+func TestBackupFormat_DropsSecretSurveyVarDefault(t *testing.T) {
+	surveyVars := `[{"name":"pw","type":"secret","default_value":"hunter2"},{"name":"host","default_value":"db"}]`
+	b := BackupDB{
+		meta:          db.Project{ID: 1, Name: "p"},
+		repositories:  []db.Repository{{ID: 20, Name: "repo"}},
+		templates:     []db.Template{{ID: 10, Name: "t", RepositoryID: 20, SurveyVarsJSON: &surveyVars}},
+		templateRoles: map[int][]db.TemplateRolePerm{},
+	}
+
+	format, err := b.format()
+	require.NoError(t, err)
+	require.Len(t, format.Templates, 1)
+	require.Len(t, format.Templates[0].SurveyVars, 2)
+
+	assert.Nil(t, format.Templates[0].SurveyVars[0].DefaultValue)
+	require.NotNil(t, format.Templates[0].SurveyVars[1].DefaultValue)
+	assert.Equal(t, "db", format.Templates[0].SurveyVars[1].DefaultValue.String())
+
+	str, err := format.Marshal()
+	require.NoError(t, err)
+	assert.NotContains(t, str, "hunter2")
 }
 
 func TestMakeUniqueNames(t *testing.T) {

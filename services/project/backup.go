@@ -64,6 +64,19 @@ func getRandomName(name string) string {
 	return name + " - " + random.String(10)
 }
 
+// dropSecretSurveyVarDefaults clears the default of every secret survey
+// variable in place and returns the slice. Validation refuses such a default
+// on save, but rows and backup files written before that rule still carry
+// one, and the value would otherwise travel as plain text.
+func dropSecretSurveyVarDefaults(surveyVars []db.SurveyVar) []db.SurveyVar {
+	for i := range surveyVars {
+		if surveyVars[i].Type == db.SurveyVarSecret {
+			surveyVars[i].DefaultValue = nil
+		}
+	}
+	return surveyVars
+}
+
 func makeUniqueNames[T any](items []T, getter func(item *T) string, setter func(item *T, name string)) {
 	for i := len(items) - 1; i >= 0; i-- {
 		for k, other := range items {
@@ -150,6 +163,11 @@ func (b *BackupDB) makeUniqueNames() {
 		item.Name = name
 	})
 
+	makeUniqueNames(b.secretStorages, func(item *db.SecretStorage) string {
+		return item.Name
+	}, func(item *db.SecretStorage, name string) {
+		item.Name = name
+	})
 }
 
 func (b *BackupDB) load(projectID int, store db.Store, workflowStore db.WorkflowManager) (err error) {
@@ -433,7 +451,7 @@ func (b *BackupDB) format() (*BackupFormat, error) {
 			if err != nil {
 				return nil, err
 			}
-			o.SurveyVars = surveyVars
+			o.SurveyVars = dropSecretSurveyVarDefaults(surveyVars)
 		}
 
 		var roles []BackupTemplateRole

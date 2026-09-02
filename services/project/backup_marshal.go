@@ -1,11 +1,28 @@
 package project
 
 import (
+	"encoding/json"
 	"fmt"
 	"reflect"
 
 	"github.com/semaphoreui/semaphore/db"
 )
+
+// marshalSurveyVarDefaultValue mirrors the JSON codec of the type: a lone
+// scalar stays a string, anything decoded from an array stays an array.
+func marshalSurveyVarDefaultValue(d db.SurveyVarDefaultValue) any {
+	if d.Values == nil {
+		return nil
+	}
+	if len(d.Values) == 1 && !d.IsArray() {
+		return d.Values[0]
+	}
+	values := make([]any, 0, len(d.Values))
+	for _, s := range d.Values {
+		values = append(values, s)
+	}
+	return values
+}
 
 func marshalValue(v reflect.Value) (any, error) {
 	// Handle pointers
@@ -14,6 +31,12 @@ func marshalValue(v reflect.Value) (any, error) {
 			return nil, nil
 		}
 		return marshalValue(v.Elem())
+	}
+
+	// The survey default keeps its value in untagged fields behind a JSON
+	// codec; walking it by tags would export an empty object.
+	if v.Type() == reflect.TypeOf(db.SurveyVarDefaultValue{}) {
+		return marshalSurveyVarDefaultValue(v.Interface().(db.SurveyVarDefaultValue)), nil
 	}
 
 	// Handle structs
@@ -188,6 +211,19 @@ func unmarshalValueWithBackupTags(data any, v reflect.Value) error {
 			v.Set(reflect.New(v.Type().Elem()))
 		}
 		return unmarshalValueWithBackupTags(data, v.Elem())
+	}
+
+	if v.Type() == reflect.TypeOf(db.SurveyVarDefaultValue{}) {
+		raw, err := json.Marshal(data)
+		if err != nil {
+			return err
+		}
+		var d db.SurveyVarDefaultValue
+		if err := d.UnmarshalJSON(raw); err != nil {
+			return err
+		}
+		v.Set(reflect.ValueOf(d))
+		return nil
 	}
 
 	// Handle structs

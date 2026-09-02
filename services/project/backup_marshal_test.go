@@ -1,6 +1,7 @@
 package project
 
 import (
+	"encoding/json"
 	"reflect"
 	"strings"
 	"testing"
@@ -119,8 +120,58 @@ func Test_ToFloat64_InvalidType_ReturnsFalse(t *testing.T) {
 	assert.False(t, ok)
 }
 
-func Test_SurveyVarSecret_Constant(t *testing.T) {
-	assert.Equal(t, db.SurveyVarType("secret"), db.SurveyVarSecret)
+// Test_MarshalValue_SurveyVarDefaultValue pins the backup shape of a survey
+// default: the value itself, in the scalar-or-array form of its JSON codec.
+// Walking the struct by tags yields an empty object, and the default is lost.
+func Test_MarshalValue_SurveyVarDefaultValue(t *testing.T) {
+	tests := []struct {
+		name     string
+		json     string
+		expected any
+	}{
+		{"scalar", `"one"`, "one"},
+		{"array", `["a","b"]`, []any{"a", "b"}},
+		{"array of one", `["a"]`, []any{"a"}},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var v db.SurveyVar
+			require.NoError(t, json.Unmarshal([]byte(`{"name":"v","default_value":`+tt.json+`}`), &v))
+
+			result, err := marshalValue(reflect.ValueOf(v))
+			require.NoError(t, err)
+			m, ok := result.(map[string]any)
+			require.True(t, ok, "expected a map, got %T", result)
+			assert.Equal(t, tt.expected, m["default_value"])
+		})
+	}
+}
+
+// Test_UnmarshalValueWithBackupTags_SurveyVarDefaultValue pins the restore
+// side: the scalar-or-array value lands in the codec, shape included.
+func Test_UnmarshalValueWithBackupTags_SurveyVarDefaultValue(t *testing.T) {
+	tests := []struct {
+		name      string
+		data      any
+		values    []string
+		wantArray bool
+	}{
+		{"scalar", "one", []string{"one"}, false},
+		{"array", []any{"a", "b"}, []string{"a", "b"}, true},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var v db.SurveyVar
+			data := map[string]any{"name": "v", "default_value": tt.data}
+			require.NoError(t, unmarshalValueWithBackupTags(data, reflect.ValueOf(&v).Elem()))
+
+			require.NotNil(t, v.DefaultValue)
+			assert.Equal(t, tt.values, v.DefaultValue.Values)
+			assert.Equal(t, tt.wantArray, v.DefaultValue.IsArray())
+		})
+	}
 }
 
 // Test_MarshalValue_ExcludesPreservedFields pins the backup:"-" tags on

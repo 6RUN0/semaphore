@@ -460,6 +460,12 @@ export default {
     },
 
     normalizeDefaultValue(type, value) {
+      // The server refuses a default on a secret variable and the editor
+      // shows no field for it; a value stored before that rule would be
+      // sent back on every save with no way to clear it.
+      if (type === 'secret') {
+        return '';
+      }
       if (type === 'select') {
         if (Array.isArray(value)) return value;
         return value == null || value === '' ? [] : [value];

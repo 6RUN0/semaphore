@@ -204,8 +204,15 @@ func ValidateSurveyVar(v SurveyVar) error {
 				}
 			}
 		}
+	case SurveyVarSecret:
+		// A default would sit in the template row and in every template
+		// read as plain text.
+		if v.DefaultValue != nil && len(v.DefaultValue.Values) > 0 {
+			return common_errors.NewValidationError(
+				"survey variable \"" + v.Name + "\": default_value is not allowed for secret type")
+		}
 	default:
-		// String, int, text, secret: scalar only.
+		// String, int, text: scalar only.
 		if v.DefaultValue != nil && v.DefaultValue.IsArray() && len(v.DefaultValue.Values) > 1 {
 			return common_errors.NewValidationError(
 				"survey variable \"" + v.Name + "\": default_value must be a string for type \"" + string(v.Type) + "\"")

@@ -327,6 +327,9 @@ func (e BackupTemplate) Restore(b *BackupDB) error {
 	template := e.Template
 	template.ProjectID = b.meta.ID
 	template.RepositoryID = RepositoryID
+	// A backup written before secret defaults were refused carries the
+	// default in plain text; validation would reject the whole template.
+	template.SurveyVars = dropSecretSurveyVarDefaults(template.SurveyVars)
 	template.EnvironmentIDs = EnvironmentIDs
 	template.InventoryID = InventoryID
 	template.ViewID = ViewID
