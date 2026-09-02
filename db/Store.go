@@ -631,6 +631,16 @@ type RoleRepository interface {
 	UpdateRole(role Role) error
 	CreateRole(role Role) (Role, error)
 	DeleteRole(slug string) error
+	// UpdateProjectRole changes name and permissions of a role that belongs
+	// to projectID. Global roles and roles of other projects yield
+	// ErrNotFound; UpdateRole has no such scope and must not be used with
+	// caller-supplied slugs. Updating to the same values succeeds.
+	UpdateProjectRole(projectID int, role Role) error
+	// DeleteProjectRole removes a role that belongs to projectID and returns
+	// ErrNotFound when no such row exists, unlike DeleteRole. Template
+	// permissions granted through the role are removed by cascade; callers
+	// that must keep them check GetProjectRoleRefs first.
+	DeleteProjectRole(projectID int, slug string) error
 }
 
 // Store is the main interface that aggregates all specialized interfaces
