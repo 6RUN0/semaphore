@@ -317,3 +317,6 @@ func (m *mockAccessKeyRepo) GetTaskAccessKey(int, int) (db.AccessKey, error) {
 }
 func (m *mockAccessKeyRepo) DeleteTaskAccessKeys(int, int) error { return nil }
 func (m *mockAccessKeyRepo) DeleteExpiredTaskAccessKeys() error  { return nil }
+func (m *mockAccessKeyRepo) GetTemplateVaultRefsByKey(int, int) ([]db.ObjectReferrer, error) {
+	return nil, nil
+}
