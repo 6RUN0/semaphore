@@ -153,13 +153,13 @@ func newDialectTestStore(t *testing.T, dialect string, envName string) *SqlDb {
 }
 
 func TestInventorySnapshotOnDialectMySQL(t *testing.T) {
-	dialectSuitesRan.mysql.Store(true)
+	dialectSuitesRan.inventorySnapshotMySQL.Store(true)
 
 	assertSnapshotWorksOn(t, newDialectTestStore(t, "mysql", envTestMySQL))
 }
 
 func TestInventorySnapshotOnDialectPostgres(t *testing.T) {
-	dialectSuitesRan.postgres.Store(true)
+	dialectSuitesRan.inventorySnapshotPostgres.Store(true)
 
 	assertSnapshotWorksOn(t, newDialectTestStore(t, "postgres", envTestPostgres))
 }

@@ -10,9 +10,16 @@ import (
 // dialectSuitesRan records that a dialect suite actually executed. TestMain
 // below is the only reader; the suites themselves are the only writers, and
 // they run one at a time in one binary.
+//
+// One flag per suite, not per engine: a shared per-engine flag lets a renamed
+// suite hide behind its sibling, since either suite setting the engine's flag
+// makes the engine look covered even though the renamed suite dropped out of
+// the selector.
 var dialectSuitesRan struct {
-	mysql    atomic.Bool
-	postgres atomic.Bool
+	inventorySnapshotMySQL    atomic.Bool
+	inventorySnapshotPostgres atomic.Bool
+	projectScopedRoleMySQL    atomic.Bool
+	projectScopedRolePostgres atomic.Bool
 }
 
 // TestMain turns a suite that never ran into a failure when the environment
@@ -31,18 +38,21 @@ func TestMain(m *testing.M) {
 	if code == 0 && os.Getenv(envTestDialectsRequired) != "" {
 		for _, suite := range []struct {
 			envName string
+			name    string
 			ran     *atomic.Bool
 		}{
-			{envTestMySQL, &dialectSuitesRan.mysql},
-			{envTestPostgres, &dialectSuitesRan.postgres},
+			{envTestMySQL, "TestInventorySnapshotOnDialectMySQL", &dialectSuitesRan.inventorySnapshotMySQL},
+			{envTestPostgres, "TestInventorySnapshotOnDialectPostgres", &dialectSuitesRan.inventorySnapshotPostgres},
+			{envTestMySQL, "TestProjectScopedRoleMutationsOnDialectMySQL", &dialectSuitesRan.projectScopedRoleMySQL},
+			{envTestPostgres, "TestProjectScopedRoleMutationsOnDialectPostgres", &dialectSuitesRan.projectScopedRolePostgres},
 		} {
 			if os.Getenv(suite.envName) == "" || suite.ran.Load() {
 				continue
 			}
 
 			fmt.Fprintf(os.Stderr,
-				"%s is set and %s demands the dialect tests, but its suite did not run\n",
-				suite.envName, envTestDialectsRequired)
+				"%s is set and %s demands the dialect tests, but %s did not run\n",
+				suite.envName, envTestDialectsRequired, suite.name)
 
 			code = 1
 		}
