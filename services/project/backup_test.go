@@ -10,6 +10,7 @@ import (
 	proFactory "github.com/semaphoreui/semaphore/pro/db/factory"
 	"github.com/semaphoreui/semaphore/util"
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 )
 
 type testItem struct {
@@ -337,6 +338,54 @@ func isUnique(items []testItem) bool {
 	}
 
 	return true
+}
+
+// TestBackupFormat_SkipsEntriesWithMissingTemplate pins the slice
+// construction in format(): `continue` inside an index-assigned loop used to
+// leave a zero-valued schedule or integration behind.
+func TestBackupFormat_SkipsEntriesWithMissingTemplate(t *testing.T) {
+	b := BackupDB{
+		meta:         db.Project{ID: 1, Name: "p"},
+		repositories: []db.Repository{{ID: 20, Name: "repo"}},
+		templates:    []db.Template{{ID: 10, Name: "existing", RepositoryID: 20}},
+		schedules: []db.Schedule{
+			{ID: 1, Name: "kept", TemplateID: 10},
+			{ID: 2, Name: "orphan", TemplateID: 999},
+		},
+		integrations: []db.Integration{
+			{ID: 1, Name: "kept", TemplateID: 10},
+			{ID: 2, Name: "orphan", TemplateID: 999},
+		},
+		integrationAliases:       map[int][]db.IntegrationAlias{},
+		integrationMatchers:      map[int][]db.IntegrationMatcher{},
+		integrationExtractValues: map[int][]db.IntegrationExtractValue{},
+		templateRoles:            map[int][]db.TemplateRolePerm{},
+	}
+
+	format, err := b.format()
+	require.NoError(t, err)
+
+	require.Len(t, format.Schedules, 1)
+	assert.Equal(t, "kept", format.Schedules[0].Name)
+	assert.Equal(t, "existing", format.Schedules[0].Template)
+
+	require.Len(t, format.Integration, 1)
+	assert.Equal(t, "kept", format.Integration[0].Name)
+	assert.Equal(t, "existing", format.Integration[0].Template)
+}
+
+// TestBackupFormat_TemplateWithoutRepositoryIsAnError pins that format()
+// reports a template whose repository is missing instead of dereferencing
+// the nil name pointer.
+func TestBackupFormat_TemplateWithoutRepositoryIsAnError(t *testing.T) {
+	b := BackupDB{
+		meta:          db.Project{ID: 1, Name: "p"},
+		templates:     []db.Template{{ID: 10, Name: "orphan", RepositoryID: 999}},
+		templateRoles: map[int][]db.TemplateRolePerm{},
+	}
+
+	_, err := b.format()
+	assert.ErrorContains(t, err, "orphan")
 }
 
 func TestMakeUniqueNames(t *testing.T) {

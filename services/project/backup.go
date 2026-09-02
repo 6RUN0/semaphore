@@ -296,8 +296,8 @@ func (b *BackupDB) format() (*BackupFormat, error) {
 		}
 	}
 
-	schedules := make([]BackupSchedule, len(b.schedules))
-	for i, o := range b.schedules {
+	schedules := make([]BackupSchedule, 0, len(b.schedules))
+	for _, o := range b.schedules {
 
 		tplName, _ := findNameByID[db.Template](o.TemplateID, b.templates)
 		var repoName *string
@@ -305,19 +305,22 @@ func (b *BackupDB) format() (*BackupFormat, error) {
 			repoName, _ = findNameByID[db.Repository](*o.RepositoryID, b.repositories)
 		}
 
+		// A schedule whose template is gone has nothing to restore into.
 		if tplName == nil {
 			continue
 		}
 
-		schedules[i] = BackupSchedule{
+		schedule := BackupSchedule{
 			o,
 			*tplName,
 			repoName,
 		}
 
 		if o.TaskParams != nil && o.TaskParams.InventoryID != nil {
-			schedules[i].TaskParams.InventoryName, _ = findNameByID[db.Inventory](*o.TaskParams.InventoryID, b.inventories)
+			schedule.TaskParams.InventoryName, _ = findNameByID[db.Inventory](*o.TaskParams.InventoryID, b.inventories)
 		}
+
+		schedules = append(schedules, schedule)
 	}
 
 	keys := make([]BackupAccessKey, len(b.keys))
@@ -383,8 +386,8 @@ func (b *BackupDB) format() (*BackupFormat, error) {
 		}
 	}
 
-	templates := make([]BackupTemplate, len(b.templates))
-	for i, o := range b.templates {
+	templates := make([]BackupTemplate, 0, len(b.templates))
+	for _, o := range b.templates {
 		var View *string = nil
 		if o.ViewID != nil {
 			View, _ = findNameByID[db.View](*o.ViewID, b.views)
@@ -412,7 +415,12 @@ func (b *BackupDB) format() (*BackupFormat, error) {
 		if o.BuildTemplateID != nil {
 			BuildTemplate, _ = findNameByID[db.Template](*o.BuildTemplateID, b.templates)
 		}
-		Repository, _ := findNameByID[db.Repository](o.RepositoryID, b.repositories)
+		Repository, err := findNameByID[db.Repository](o.RepositoryID, b.repositories)
+		if err != nil {
+			// The database forbids a template without a repository, so this is
+			// corrupt input; report it rather than dereference nil.
+			return nil, fmt.Errorf("template %s: %w", o.Name, err)
+		}
 
 		var Inventory *string = nil
 		if o.InventoryID != nil {
@@ -452,7 +460,7 @@ func (b *BackupDB) format() (*BackupFormat, error) {
 			}
 		}
 
-		templates[i] = BackupTemplate{
+		templates = append(templates, BackupTemplate{
 			Template:      o,
 			View:          View,
 			Repository:    *Repository,
@@ -461,11 +469,11 @@ func (b *BackupDB) format() (*BackupFormat, error) {
 			BuildTemplate: BuildTemplate,
 			Vaults:        vaults,
 			Roles:         roles,
-		}
+		})
 	}
 
-	integrations := make([]BackupIntegration, len(b.integrations))
-	for i, o := range b.integrations {
+	integrations := make([]BackupIntegration, 0, len(b.integrations))
+	for _, o := range b.integrations {
 
 		var aliases []string
 
@@ -485,7 +493,7 @@ func (b *BackupDB) format() (*BackupFormat, error) {
 			keyName, _ = findNameByID[db.AccessKey](*o.AuthSecretID, b.keys)
 		}
 
-		integrations[i] = BackupIntegration{
+		integration := BackupIntegration{
 			Integration:   o,
 			Aliases:       aliases,
 			Matchers:      b.integrationMatchers[o.ID],
@@ -495,8 +503,10 @@ func (b *BackupDB) format() (*BackupFormat, error) {
 		}
 
 		if o.TaskParams != nil && o.TaskParams.InventoryID != nil {
-			integrations[i].TaskParams.InventoryName, _ = findNameByID[db.Inventory](*o.TaskParams.InventoryID, b.inventories)
+			integration.TaskParams.InventoryName, _ = findNameByID[db.Inventory](*o.TaskParams.InventoryID, b.inventories)
 		}
+
+		integrations = append(integrations, integration)
 	}
 
 	var integrationAliases []string
