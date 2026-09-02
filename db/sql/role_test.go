@@ -2,10 +2,13 @@ package sql
 
 import (
 	"fmt"
+	"path/filepath"
+	"strings"
 	"testing"
 	"time"
 
 	"github.com/semaphoreui/semaphore/db"
+	"github.com/semaphoreui/semaphore/util"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -88,4 +91,82 @@ func assertProjectScopedRoleMutations(t *testing.T, store *SqlDb) {
 		_, err := store.GetProjectRole(projA.ID, customSlug)
 		assert.ErrorIs(t, err, db.ErrNotFound)
 	})
+}
+
+// afterQueryHook is a gorp logger: gorp reports every statement to it right
+// after the statement completes, which is the only seam a test has to act
+// between two statements of one store method.
+type afterQueryHook func(query string)
+
+func (h afterQueryHook) Printf(_ string, v ...any) {
+	if len(v) < 2 {
+		return
+	}
+	if query, ok := v[1].(string); ok {
+		h(query)
+	}
+}
+
+// newFileBackedTestStore is InitConfigCreateTestStore on a WAL file with two
+// connections: a hook can then write while a cursor is still open on the
+// other connection. The in-memory store keeps one connection, and a second
+// one would open a second, empty database.
+func newFileBackedTestStore(t *testing.T) *SqlDb {
+	t.Helper()
+
+	util.Config = &util.ConfigType{
+		SQLite:  &util.DbConfig{Hostname: filepath.Join(t.TempDir(), "test.db")},
+		Dialect: "sqlite",
+		Log: &util.ConfigLog{
+			Events: &util.EventLogType{},
+			Tasks:  &util.TaskLogType{},
+		},
+		Process: &util.ConfigProcess{},
+		Runners: &util.RunnersConfig{},
+		Apps:    map[string]util.App{"ansible": {}, "bash": {}},
+	}
+	store := CreateDb(util.DbDriverSQLite)
+	store.Connect()
+	t.Cleanup(store.Close)
+
+	_, err := store.Sql().Exec("PRAGMA journal_mode=WAL")
+	require.NoError(t, err)
+	store.Sql().Db.SetMaxOpenConns(2)
+	require.NoError(t, db.Migrate(store, nil))
+
+	return store
+}
+
+// TestUpdateProjectRole_RoleRemovedAfterRead pins the HA case: another node
+// deletes the role between a read and the write. Reporting success then
+// leaves the caller believing a role exists that does not.
+func TestUpdateProjectRole_RoleRemovedAfterRead(t *testing.T) {
+	store := newFileBackedTestStore(t)
+
+	proj, err := store.CreateProject(db.Project{Name: "p"})
+	require.NoError(t, err)
+	role, err := store.CreateRole(db.Role{Slug: "custom", Name: "Custom", ProjectID: &proj.ID})
+	require.NoError(t, err)
+
+	removed := false
+	store.Sql().TraceOn("", afterQueryHook(func(query string) {
+		q := strings.ToLower(query)
+		if removed || !strings.HasPrefix(q, "select") || !strings.Contains(q, "role") {
+			return
+		}
+		removed = true
+		require.NoError(t, store.DeleteRole(role.Slug))
+	}))
+	t.Cleanup(store.Sql().TraceOff)
+
+	role.Name = "Renamed"
+	err = store.UpdateProjectRole(proj.ID, role)
+
+	if err != nil {
+		assert.ErrorIs(t, err, db.ErrNotFound)
+		return
+	}
+	got, err := store.GetProjectRole(proj.ID, role.Slug)
+	require.NoError(t, err, "update reported success for a role that no longer exists")
+	assert.Equal(t, "Renamed", got.Name)
 }

@@ -67,19 +67,30 @@ func (d *SqlDb) GetProjectOrGlobalRoleBySlug(projectID int, slug string) (db.Rol
 }
 
 func (d *SqlDb) UpdateProjectRole(projectID int, role db.Role) error {
-	// Existence is checked by a select: RowsAffected after UPDATE counts
-	// changed rows on MySQL, so an idempotent update would look missing.
-	if _, err := d.GetProjectRole(projectID, role.Slug); err != nil {
-		return err
-	}
-
 	res, err := d.exec(
 		"update `role` set name=?, permissions=? where slug=? and project_id=?",
 		role.Name,
 		role.Permissions,
 		role.Slug,
 		projectID)
-	return validateMutationResult(res, err)
+	if err != nil {
+		return validateMutationResult(res, err)
+	}
+
+	n, err := res.RowsAffected()
+	if err != nil {
+		return err
+	}
+	if n > 0 {
+		return nil
+	}
+
+	// Zero rows is either a missing role or, on MySQL, an update to
+	// identical values: it counts changed rows, not matched rows. The
+	// write goes first so that a role removed by another node between the
+	// two statements is reported missing rather than updated.
+	_, err = d.GetProjectRole(projectID, role.Slug)
+	return err
 }
 
 func (d *SqlDb) DeleteProjectRole(projectID int, slug string) error {
