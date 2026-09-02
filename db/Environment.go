@@ -47,7 +47,7 @@ type Environment struct {
 	ID        int     `db:"id" json:"id" backup:"-"`
 	Name      string  `db:"name" json:"name" binding:"required"`
 	ProjectID int     `db:"project_id" json:"project_id" backup:"-"`
-	Password  *string `db:"password" json:"password"`
+	Password  *string `db:"password" json:"password" backup:"-"`
 	JSON      string  `db:"json" json:"json" binding:"required"`
 	ENV       *string `db:"env" json:"env" binding:"required"`
 

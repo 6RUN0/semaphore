@@ -28,25 +28,27 @@ const (
 )
 
 type Runner struct {
-	ID                int        `db:"id" json:"id"`
-	Token             string     `db:"token" json:"-" backup:"-"`
-	ProjectID         *int       `db:"project_id" json:"project_id"`
-	Webhook           string     `db:"webhook" json:"webhook"`
+	ID        int    `db:"id" json:"id" backup:"-"`
+	Token     string `db:"token" json:"-" backup:"-"`
+	ProjectID *int   `db:"project_id" json:"project_id"`
+	// Webhook is a delivery URL that commonly carries a token; config sync
+	// treats it as a secret, and the JSON backup must not export it either.
+	Webhook           string     `db:"webhook" json:"webhook" backup:"-"`
 	MaxParallelTasks  int        `db:"max_parallel_tasks" json:"max_parallel_tasks"`
 	Active            bool       `db:"active" json:"active"`
 	IsDefault         bool       `db:"is_default" json:"is_default"`
 	Name              string     `db:"name" json:"name"`
 	Tags              []string   `db:"-" json:"tags" backup:"tags"`
-	Touched           *time.Time `db:"touched" json:"touched"`
-	CleaningRequested *time.Time `db:"cleaning_requested" json:"cleaning_requested"`
+	Touched           *time.Time `db:"touched" json:"touched" backup:"-"`
+	CleaningRequested *time.Time `db:"cleaning_requested" json:"cleaning_requested" backup:"-"`
 
 	// StartedAt is the runner process's start time, reported by the runner on
 	// every poll (X-Runner-Started-At header) and persisted next to Touched.
 	// It changes on every restart, which is how the server detects that a
 	// runner lost its in-memory job pool while still polling.
-	StartedAt *time.Time `db:"started_at" json:"started_at"`
+	StartedAt *time.Time `db:"started_at" json:"started_at" backup:"-"`
 
-	PublicKey *string `db:"public_key" json:"-"`
+	PublicKey *string `db:"public_key" json:"-" backup:"-"`
 
 	// Registered is a transient flag (never persisted) used at creation time to
 	// request a runner without an auth token. Such a runner gets a one-time,

@@ -44,7 +44,7 @@ type AccessKey struct {
 	// Secret used internally, do not assign this field.
 	// You should use methods SerializeSecret to fill this field.
 	Secret      *string `db:"secret" json:"-" backup:"-"`
-	Plain       *string `db:"plain" json:"plain,omitempty"`
+	Plain       *string `db:"plain" json:"plain,omitempty" backup:"-"`
 	IgnorePlain bool
 
 	String         string        `db:"-" json:"string"`
@@ -81,7 +81,7 @@ type AccessKey struct {
 	SourceStorageKey  *string                     `db:"source_storage_key" json:"source_storage_key,omitempty"`
 	SourceStorageType *AccessKeySourceStorageType `db:"source_storage_type" json:"source_storage_type,omitempty"`
 
-	Synchronized bool `db:"synchronized" json:"synchronized,omitempty"`
+	Synchronized bool `db:"synchronized" json:"synchronized,omitempty" backup:"-"`
 }
 
 func (key *AccessKey) IsNativelyReadOnly() bool {

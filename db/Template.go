@@ -72,6 +72,9 @@ const (
 	SurveyVarEnum   SurveyVarType = "enum"
 	SurveyVarText   SurveyVarType = "text"
 	SurveyVarSelect SurveyVarType = "select"
+	// SurveyVarSecret marks a survey variable whose value must never be
+	// exported: config sync omits its default_value.
+	SurveyVarSecret SurveyVarType = "secret"
 )
 
 type SurveyVarTarget string
