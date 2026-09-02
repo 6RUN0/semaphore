@@ -89,3 +89,15 @@ func (d *SqlDb) DeleteProjectRole(projectID int, slug string) error {
 	}
 	return requireAffectedRow(res)
 }
+
+func (d *SqlDb) GetProjectRoleRefs(projectID int, slug string) ([]db.ObjectReferrer, error) {
+	refs := make([]db.ObjectReferrer, 0)
+	_, err := d.selectAll(&refs,
+		"select t.id as id, t.name as name "+
+			"from project__template_role r "+
+			"join project__template t on t.id = r.template_id "+
+			"where r.project_id = ? and r.role_slug = ? "+
+			"order by t.name",
+		projectID, slug)
+	return refs, err
+}

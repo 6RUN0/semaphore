@@ -85,3 +85,15 @@ func (d *SqlDb) UpdateTemplateVaults(projectID int, templateID int, vaults []db.
 
 	return
 }
+
+func (d *SqlDb) GetTemplateVaultRefsByKey(projectID int, keyID int) ([]db.ObjectReferrer, error) {
+	refs := make([]db.ObjectReferrer, 0)
+	_, err := d.selectAll(&refs,
+		"select distinct t.id as id, t.name as name "+
+			"from project__template_vault v "+
+			"join project__template t on t.id = v.template_id "+
+			"where v.project_id = ? and v.vault_key_id = ? "+
+			"order by t.name",
+		projectID, keyID)
+	return refs, err
+}

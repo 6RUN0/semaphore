@@ -68,3 +68,11 @@ func (d *SqlDb) SetViewPositions(projectID int, positions map[int]int) error {
 	}
 	return nil
 }
+
+func (d *SqlDb) GetViewRefs(projectID int, viewID int) ([]db.ObjectReferrer, error) {
+	refs := make([]db.ObjectReferrer, 0)
+	_, err := d.selectAll(&refs,
+		"select id, name from project__template where project_id = ? and view_id = ? order by name",
+		projectID, viewID)
+	return refs, err
+}

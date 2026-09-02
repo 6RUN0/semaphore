@@ -412,6 +412,9 @@ func (o GetAccessKeyOptions) Validate() error {
 type AccessKeyManager interface {
 	GetAccessKey(projectID int, accessKeyID int) (AccessKey, error)
 	GetAccessKeyRefs(projectID int, accessKeyID int) (ObjectReferrers, error)
+	// GetTemplateVaultRefsByKey lists templates of projectID whose vaults use
+	// the key; getObjectRefs does not see project__template_vault.
+	GetTemplateVaultRefsByKey(projectID int, keyID int) ([]ObjectReferrer, error)
 	GetAccessKeys(projectID int, options GetAccessKeyOptions, params RetrieveQueryParams) ([]AccessKey, error)
 	UpdateAccessKey(accessKey AccessKey) error
 	CreateAccessKey(accessKey AccessKey) (AccessKey, error)
@@ -555,6 +558,8 @@ type ViewManager interface {
 	CreateView(view View) (View, error)
 	DeleteView(projectID int, viewID int) error
 	SetViewPositions(projectID int, viewPositions map[int]int) error
+	// GetViewRefs lists templates of projectID shown in the view.
+	GetViewRefs(projectID int, viewID int) ([]ObjectReferrer, error)
 }
 
 // RunnerManager handles runner-related operations
@@ -641,6 +646,9 @@ type RoleRepository interface {
 	// permissions granted through the role are removed by cascade; callers
 	// that must keep them check GetProjectRoleRefs first.
 	DeleteProjectRole(projectID int, slug string) error
+	// GetProjectRoleRefs lists templates of projectID that grant permissions
+	// through the role, so a delete can be refused while they exist.
+	GetProjectRoleRefs(projectID int, slug string) ([]ObjectReferrer, error)
 }
 
 // Store is the main interface that aggregates all specialized interfaces
