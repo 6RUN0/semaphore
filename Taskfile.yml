@@ -171,8 +171,8 @@ tasks:
       # Anchored, and backed by TestMain in the package: `go test -run` exits 0
       # when the pattern matches nothing, so a renamed suite would otherwise
       # turn every run below into a silent pass.
-      MYSQL_SUITE: go test ./db/sql/ -count=1 -v -run '^(TestInventorySnapshotOnDialectMySQL|TestProjectScopedRoleMutationsOnDialectMySQL)$'
-      POSTGRES_SUITE: go test ./db/sql/ -count=1 -v -run '^(TestInventorySnapshotOnDialectPostgres|TestProjectScopedRoleMutationsOnDialectPostgres)$'
+      MYSQL_SUITE: go test ./db/sql/ -count=1 -v -run '^(TestInventorySnapshotOnDialectMySQL|TestProjectScopedRoleMutationsOnDialectMySQL|TestReferenceQueriesForPruneOnDialectMySQL)$'
+      POSTGRES_SUITE: go test ./db/sql/ -count=1 -v -run '^(TestInventorySnapshotOnDialectPostgres|TestProjectScopedRoleMutationsOnDialectPostgres|TestReferenceQueriesForPruneOnDialectPostgres)$'
     cmds:
       - "{{ .COMPOSE }} up -d --wait mysql mysql-next mariadb mariadb-next postgres postgres-next"
       # MySQL 8.4 LTS

@@ -20,6 +20,8 @@ var dialectSuitesRan struct {
 	inventorySnapshotPostgres atomic.Bool
 	projectScopedRoleMySQL    atomic.Bool
 	projectScopedRolePostgres atomic.Bool
+	referenceQueriesMySQL     atomic.Bool
+	referenceQueriesPostgres  atomic.Bool
 }
 
 // TestMain turns a suite that never ran into a failure when the environment
@@ -45,6 +47,8 @@ func TestMain(m *testing.M) {
 			{envTestPostgres, "TestInventorySnapshotOnDialectPostgres", &dialectSuitesRan.inventorySnapshotPostgres},
 			{envTestMySQL, "TestProjectScopedRoleMutationsOnDialectMySQL", &dialectSuitesRan.projectScopedRoleMySQL},
 			{envTestPostgres, "TestProjectScopedRoleMutationsOnDialectPostgres", &dialectSuitesRan.projectScopedRolePostgres},
+			{envTestMySQL, "TestReferenceQueriesForPruneOnDialectMySQL", &dialectSuitesRan.referenceQueriesMySQL},
+			{envTestPostgres, "TestReferenceQueriesForPruneOnDialectPostgres", &dialectSuitesRan.referenceQueriesPostgres},
 		} {
 			if os.Getenv(suite.envName) == "" || suite.ran.Load() {
 				continue

@@ -1,7 +1,9 @@
 package sql
 
 import (
+	"fmt"
 	"testing"
+	"time"
 
 	"github.com/semaphoreui/semaphore/db"
 	"github.com/stretchr/testify/assert"
@@ -12,10 +14,26 @@ import (
 // getObjectRefs does not cover: template roles, template views and template
 // vault keys. Config sync prune refuses to delete an object that has any.
 func TestReferenceQueriesForPrune(t *testing.T) {
-	store := InitConfigCreateTestStore()
+	assertReferenceQueriesForPrune(t, InitConfigCreateTestStore())
+}
 
-	proj, err := store.CreateProject(db.Project{Name: "p"})
+// assertReferenceQueriesForPrune is shared with the dialect suites in
+// object_refs_dialect_test.go, which run it on a persistent MySQL or
+// PostgreSQL database: the role slug carries a per-run suffix so reruns do
+// not collide on the slug primary key.
+func assertReferenceQueriesForPrune(t *testing.T, store *SqlDb) {
+	t.Helper()
+
+	suffix := fmt.Sprintf("%d", time.Now().UnixNano())
+
+	proj, err := store.CreateProject(db.Project{Name: "p-" + suffix})
 	require.NoError(t, err)
+	other, err := store.CreateProject(db.Project{Name: "other-" + suffix})
+	require.NoError(t, err)
+	t.Cleanup(func() {
+		_ = store.DeleteProject(proj.ID)
+		_ = store.DeleteProject(other.ID)
+	})
 
 	key, err := store.CreateAccessKey(db.AccessKey{ProjectID: &proj.ID, Type: db.AccessKeyNone, Name: "none"})
 	require.NoError(t, err)
@@ -28,7 +46,7 @@ func TestReferenceQueriesForPrune(t *testing.T) {
 	require.NoError(t, err)
 	view, err := store.CreateView(db.View{ProjectID: proj.ID, Title: "v"})
 	require.NoError(t, err)
-	role, err := store.CreateRole(db.Role{Slug: "custom1", Name: "Custom", ProjectID: &proj.ID})
+	role, err := store.CreateRole(db.Role{Slug: "custom-" + suffix, Name: "Custom", ProjectID: &proj.ID})
 	require.NoError(t, err)
 
 	tpl, err := store.CreateTemplate(db.Template{
@@ -39,9 +57,6 @@ func TestReferenceQueriesForPrune(t *testing.T) {
 	require.NoError(t, err)
 
 	_, err = store.CreateTemplateRole(db.TemplateRolePerm{ProjectID: proj.ID, TemplateID: tpl.ID, RoleSlug: role.Slug})
-	require.NoError(t, err)
-
-	other, err := store.CreateProject(db.Project{Name: "other"})
 	require.NoError(t, err)
 
 	want := []db.ObjectReferrer{{ID: tpl.ID, Name: "t"}}
