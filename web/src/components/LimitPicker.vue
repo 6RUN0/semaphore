@@ -4,6 +4,7 @@
       <div class="subtitle-2">{{ $t('limit') }}</div>
       <v-spacer />
       <v-btn
+        v-if="canRefresh"
         icon
         small
         :loading="refreshing"
@@ -208,6 +209,8 @@
 /* eslint-disable import/no-extraneous-dependencies,import/extensions */
 
 import axios from 'axios';
+import PermissionsCheck from '@/components/PermissionsCheck';
+import { USER_PERMISSIONS } from '@/lib/constants';
 
 // searchDebounce keeps a keystroke from becoming a request. The host list is
 // paged on the server, so every change of the query is a round trip.
@@ -230,6 +233,10 @@ const resolvePollBackoff = 1.5;
 const resolvePollGiveUp = 30 * 60 * 1000;
 
 export default {
+  // PermissionsCheck brings the userPermissions and isAdmin props along with
+  // can(), so the picker reads a role the same way every other view does.
+  mixins: [PermissionsCheck],
+
   props: {
     projectId: [Number, String],
     // Route parameters arrive as strings; a strict Number here would reject
@@ -298,6 +305,23 @@ export default {
 
     pageSize() {
       return 500;
+    },
+
+    // Rebuilding the host list needs the permission to manage project
+    // resources: the whole snapshot subtree is gated on it, while reading the
+    // picker is open to every member. Without it the button is a click that can
+    // only end in 403.
+    //
+    // A caller that passes no permissions at all is not a caller without them.
+    // The picker sits behind forms that thread none down to it, and treating
+    // silence as denial would take the button away from the users who do hold
+    // the permission.
+    canRefresh() {
+      if (this.userPermissions == null) {
+        return true;
+      }
+
+      return this.can(USER_PERMISSIONS.manageProjectResources);
     },
   },
 

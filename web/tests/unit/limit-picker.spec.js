@@ -3,6 +3,7 @@ import { shallowMount, createLocalVue } from '@vue/test-utils';
 import Vuetify from 'vuetify';
 import axios from 'axios';
 import LimitPicker from '@/components/LimitPicker.vue';
+import { USER_PERMISSIONS } from '@/lib/constants';
 
 const localVue = createLocalVue();
 localVue.use(Vuetify);
@@ -407,5 +408,231 @@ describe('LimitPicker.vue', () => {
     expect(wrapper.vm.snapshot).to.equal(null);
     expect(wrapper.vm.groups).to.deep.equal([]);
     expect(wrapper.vm.hosts).to.deep.equal([]);
+  });
+
+  // refresh() is the only thing the picker does that causes work on the server:
+  // 200 carries a rebuilt snapshot, 202 means a runner was asked to list the
+  // hosts, and 403 arrives with two different reasons behind it.
+  describe('refreshing the snapshot', () => {
+    let pending = [];
+    let savedAdapter;
+
+    beforeEach(() => {
+      pending = [];
+      savedAdapter = axios.defaults.adapter;
+      axios.defaults.adapter = (config) => new Promise((resolve, reject) => {
+        pending.push({ config, resolve, reject });
+      });
+    });
+
+    afterEach(() => {
+      axios.defaults.adapter = savedAdapter;
+    });
+
+    function refreshRequests() {
+      return pending.filter((request) => request.config.url.endsWith('/refresh'));
+    }
+
+    // created() has a snapshot load of its own in flight and axios reaches the
+    // adapter only on a later microtask, so the refresh is picked out by url
+    // and waited for rather than indexed into whatever happens to be pending.
+    async function waitForRefresh() {
+      for (let attempt = 0; attempt < 50 && refreshRequests().length === 0; attempt += 1) {
+        // eslint-disable-next-line no-await-in-loop
+        await new Promise((resolve) => { setTimeout(resolve, 0); });
+      }
+
+      expect(refreshRequests().length).to.equal(1);
+
+      return refreshRequests()[0];
+    }
+
+    function respond(request, status, data) {
+      request.resolve({
+        data,
+        status,
+        statusText: '',
+        headers: {},
+        config: request.config,
+      });
+    }
+
+    // A custom adapter bypasses the status check axios does inside its own
+    // adapters, so a refusal has to be rejected the way axios would reject it.
+    function refuse(request, status, data) {
+      const err = new Error(`request failed with status ${status}`);
+      err.response = {
+        status,
+        data,
+        headers: {},
+        config: request.config,
+      };
+      request.reject(err);
+    }
+
+    // load() is counted rather than run: it would put requests of its own into
+    // the same pending queue, and what it does is covered on its own elsewhere.
+    function pickerRefreshing() {
+      const wrapper = mountPicker({ inventoryId: 9 });
+      const loads = { count: 0 };
+      wrapper.vm.load = () => { loads.count += 1; };
+
+      return { wrapper, loads };
+    }
+
+    it('reads the lists back when the server rebuilt the snapshot itself', async () => {
+      const { wrapper, loads } = pickerRefreshing();
+
+      const done = wrapper.vm.refresh();
+      const request = await waitForRefresh();
+
+      expect(request.config.method).to.equal('post');
+      expect(wrapper.vm.refreshing).to.equal(true);
+
+      respond(request, 200, { status: 'ok', host_count: 3 });
+      await done;
+
+      expect(wrapper.vm.snapshot).to.deep.equal({ status: 'ok', host_count: 3 });
+      expect(loads.count).to.equal(1, 'a rebuilt snapshot has to be read back');
+      expect(wrapper.vm.pollTimeout).to.equal(null, 'nothing is pending to poll for');
+      expect(wrapper.vm.refreshing).to.equal(false);
+      expect(wrapper.vm.error).to.equal(null);
+
+      wrapper.destroy();
+    });
+
+    it('empties the lists and starts polling when a resolve was dispatched', async () => {
+      const { wrapper, loads } = pickerRefreshing();
+      await wrapper.setData({
+        groups: [{ name: 'web', host_count: 1 }],
+        hosts: [{ name: 'web01' }],
+      });
+
+      const done = wrapper.vm.refresh();
+      respond(await waitForRefresh(), 202, { status: 'pending', task_id: 5 });
+      await done;
+
+      expect(wrapper.vm.groups).to.deep.equal([], 'the old groups are not the pending ones');
+      expect(wrapper.vm.hosts).to.deep.equal([]);
+      expect(wrapper.vm.pollTimeout).to.not.equal(null);
+      expect(loads.count).to.equal(0, 'there is nothing to read back until it settles');
+      expect(wrapper.vm.refreshing).to.equal(false);
+
+      wrapper.destroy();
+    });
+
+    // A refresh is a new resolve. Carrying the previous one's stretched
+    // interval into this wait would poll it once every thirty seconds, and
+    // carrying its deadline would stop the poll before it ever started.
+    it('starts the poll backoff over on every refresh', async () => {
+      const { wrapper } = pickerRefreshing();
+      await wrapper.setData({ pollInterval: 30000, pollDeadline: Date.now() - 1 });
+
+      const done = wrapper.vm.refresh();
+      respond(await waitForRefresh(), 202, { status: 'pending' });
+      await done;
+
+      expect(wrapper.vm.pollTimeout).to.not.equal(null, 'a stale deadline must not stop it');
+      expect(wrapper.vm.error).to.equal(null);
+      // schedulePoll waited the starting interval and stretched the next one
+      // from there rather than from the interval the previous resolve reached.
+      expect(wrapper.vm.pollInterval).to.equal(4500);
+
+      wrapper.destroy();
+    });
+
+    // 403 comes from two places: the dispatcher, which explains that listing
+    // these hosts runs a task, and the project middleware, which sends an empty
+    // body for a missing permission to manage resources. Naming the first
+    // reason for the second case tells a user they lack a permission they hold.
+    it('explains a refusal that carries no reason of its own', async () => {
+      const { wrapper } = pickerRefreshing();
+
+      const done = wrapper.vm.refresh();
+      refuse(await waitForRefresh(), 403, '');
+      await done;
+
+      expect(wrapper.vm.error).to.equal('refreshHostListForbidden');
+      expect(wrapper.vm.refreshing).to.equal(false);
+
+      wrapper.destroy();
+    });
+
+    it('keeps the reason a refusal did carry', async () => {
+      const { wrapper } = pickerRefreshing();
+      const reason = 'Listing these hosts runs a task, which you are not allowed to do.';
+
+      const done = wrapper.vm.refresh();
+      refuse(await waitForRefresh(), 403, { error: reason });
+      await done;
+
+      expect(wrapper.vm.error).to.equal(reason);
+
+      wrapper.destroy();
+    });
+
+    it('reports a failure that is not a refusal', async () => {
+      const { wrapper } = pickerRefreshing();
+
+      const done = wrapper.vm.refresh();
+      refuse(await waitForRefresh(), 500, { error: 'Internal server error' });
+      await done;
+
+      expect(wrapper.vm.error).to.equal('Internal server error');
+      expect(wrapper.vm.refreshing).to.equal(false);
+
+      wrapper.destroy();
+    });
+
+    // The picker stays mounted while the task form has no inventory picked yet,
+    // and the refresh route needs one in its path.
+    it('does not ask the server to refresh an inventory that is not there', async () => {
+      const wrapper = mountPicker();
+
+      await wrapper.vm.refresh();
+
+      expect(refreshRequests()).to.have.lengthOf(0);
+      expect(wrapper.vm.refreshing).to.equal(false);
+
+      wrapper.destroy();
+    });
+  });
+
+  // The refresh button is a click that can only end in 403 for a member who may
+  // not manage project resources: the whole snapshot subtree is gated on that
+  // permission, while the picker itself is open to every member of the project.
+  describe('the refresh button', () => {
+    function refreshButton(wrapper) {
+      return wrapper.find('[title="refreshHostList"]');
+    }
+
+    it('hides the button from a member who may not manage project resources', () => {
+      const wrapper = mountPicker({ userPermissions: 0 });
+
+      expect(refreshButton(wrapper).exists()).to.equal(false);
+    });
+
+    it('shows the button to a member who may', () => {
+      const wrapper = mountPicker({
+        userPermissions: USER_PERMISSIONS.manageProjectResources,
+      });
+
+      expect(refreshButton(wrapper).exists()).to.equal(true);
+    });
+
+    it('shows the button to an admin whose project role carries nothing', () => {
+      const wrapper = mountPicker({ userPermissions: 0, isAdmin: true });
+
+      expect(refreshButton(wrapper).exists()).to.equal(true);
+    });
+
+    // The picker is reached through forms that thread no permissions down to it
+    // yet. There "not told" must not read as "denied", or the button would go
+    // away for the users who do hold the permission.
+    it('shows the button when it has been told no permissions at all', () => {
+      const wrapper = mountPicker();
+
+      expect(refreshButton(wrapper).exists()).to.equal(true);
+    });
   });
 });
