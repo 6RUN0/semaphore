@@ -394,3 +394,43 @@ func TestParseInventorySourceRefusesAnEmptyPath(t *testing.T) {
 		assert.Contains(t, err.Error(), "no path inside its repository")
 	}
 }
+
+// Ansible picks the inventory plugin by extension before it looks at the
+// content: the yaml plugin's verify_file claims a file only when the extension
+// is empty or one of YAML_FILENAME_EXTENSIONS (.yml, .yaml, .json), so an
+// inventory called hosts.ini never reaches it however it is written. Where the
+// extension leaves the choice open, the content decides, and a document that
+// declares no group at all is not a YAML inventory.
+func TestParseInventorySourceChoosesFormatLikeAnsible(t *testing.T) {
+	// An entry an INI inventory can plausibly hold, which also decodes as a
+	// one-key YAML mapping whose value is a scalar rather than a group.
+	ambiguous := "web1 ansible_host: 10.0.0.1\n"
+	yamlInventory := "web:\n  hosts:\n    web01:\n"
+
+	for _, tt := range []struct {
+		name     string
+		filename string
+		content  string
+		hosts    []string
+		groups   []string
+	}{
+		{"no extension reads an ini entry as ini", "hosts", ambiguous, []string{"web1"}, []string{"ungrouped"}},
+		{"an ini extension is never yaml", "hosts.ini", ambiguous, []string{"web1"}, []string{"ungrouped"}},
+		{"a yaml extension stays yaml", "hosts.yml", ambiguous, []string{}, []string{}},
+		{"no extension still reads a yaml inventory as yaml", "hosts", yamlInventory, []string{"web01"}, []string{"web"}},
+		{"a yaml extension keeps a yaml inventory", "inv.yaml", yamlInventory, []string{"web01"}, []string{"web"}},
+		{"json counts as yaml", "inv.json", `{"web": {"hosts": {"web01": null}}}`, []string{"web01"}, []string{"web"}},
+		{"an ini extension keeps an ini inventory", "hosts.ini", "[web]\nweb01\n", []string{"web01"}, []string{"web"}},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			root := t.TempDir()
+			writeSourceFile(t, filepath.Join(root, tt.filename), tt.content, 0600)
+
+			parsed, err := ParseInventorySource(root, tt.filename)
+
+			require.NoError(t, err)
+			assert.Equal(t, tt.hosts, parsed.Hosts)
+			assert.Equal(t, tt.groups, inventoryGroupNames(parsed))
+		})
+	}
+}

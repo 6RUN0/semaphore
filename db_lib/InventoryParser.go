@@ -5,6 +5,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"unicode"
 
 	"github.com/semaphoreui/semaphore/db"
 	"gopkg.in/yaml.v3"
@@ -164,7 +165,12 @@ func feedINIInventory(builder *inventoryBuilder, content string) error {
 		}
 
 		if body, ok := iniSectionHeader(line); ok {
-			group, kind = parseINISectionHeader(body)
+			name, sectionKind, err := parseINISectionHeader(body)
+			if err != nil {
+				return err
+			}
+
+			group, kind = name, sectionKind
 
 			if err := builder.declareGroup(group); err != nil {
 				return err
@@ -231,6 +237,15 @@ func feedYAMLInventory(builder *inventoryBuilder, content string) error {
 // rather than unmarshalling every file of the directory twice.
 func feedYAMLMapping(builder *inventoryBuilder, mapping map[string]any) error {
 	for name, node := range mapping {
+		// Ansible's yaml plugin drops an entry that is not a group definition
+		// ("Skipping '%s' as this is not a valid group definition") instead of
+		// failing the file, so a mapping that mixes real groups with stray
+		// keys still yields the groups. Declaring one for a stray key would
+		// offer a name that selects nothing and that no play addresses.
+		if !isYAMLGroupDefinition(node) {
+			continue
+		}
+
 		if err := builder.declareGroup(name); err != nil {
 			return err
 		}
@@ -276,20 +291,53 @@ func iniSectionHeader(line string) (string, bool) {
 }
 
 // parseINISectionHeader splits a section header body into a group name and the
-// kind of entries the section holds. A suffix other than :vars or :children
-// stays part of the group name: Ansible rejects such a header, and inventing a
-// group from a typo would hide the mistake instead of showing it.
-func parseINISectionHeader(body string) (string, iniSectionKind) {
-	body = strings.TrimSpace(body)
+// kind of entries the section holds.
+//
+// Ansible's ini plugin matches the header against the pattern quoted on
+// iniSectionHeader and then refuses a tag outside hosts, children and vars, so
+// a name holding whitespace and an unknown suffix are both parse errors there.
+// They are errors here too: taking "[a b]" or "[web:foo]" at face value would
+// invent a group out of a typo and put a name in the picker that no play
+// addresses, while the group the author meant silently holds nothing.
+//
+// The body is not trimmed, because the name class excludes whitespace
+// anywhere: "[ web ]" is a refusal in Ansible rather than the group "web".
+func parseINISectionHeader(body string) (string, iniSectionKind, error) {
+	name, tag, tagged := strings.Cut(body, ":")
 
-	switch {
-	case strings.HasSuffix(body, ":vars"):
-		return strings.TrimSuffix(body, ":vars"), iniSectionVars
-	case strings.HasSuffix(body, ":children"):
-		return strings.TrimSuffix(body, ":children"), iniSectionChildren
-	default:
-		return body, iniSectionHosts
+	if !isINIGroupName(name) {
+		return "", iniSectionHosts, fmt.Errorf("inventory section header [%s] is not a group name", body)
 	}
+
+	if !tagged {
+		return name, iniSectionHosts, nil
+	}
+
+	switch tag {
+	case "hosts":
+		return name, iniSectionHosts, nil
+	case "children":
+		return name, iniSectionChildren, nil
+	case "vars":
+		return name, iniSectionVars, nil
+	default:
+		return "", iniSectionHosts, fmt.Errorf("inventory section header [%s] has unknown type %q", body, tag)
+	}
+}
+
+// isINIGroupName reports whether name matches the [^:\]\s]+ class Ansible's
+// ini plugin accepts. Python's \s is Unicode-aware on a str pattern, so a
+// non-breaking space pasted into a header is rejected there as well.
+func isINIGroupName(name string) bool {
+	if name == "" {
+		return false
+	}
+
+	if strings.ContainsAny(name, ":]") {
+		return false
+	}
+
+	return strings.IndexFunc(name, unicode.IsSpace) < 0
 }
 
 // inventoryBuilder accumulates hosts and group membership while a document is
@@ -804,6 +852,19 @@ func normalizeMapping(node any) (map[string]any, bool) {
 	default:
 		return nil, false
 	}
+}
+
+// isYAMLGroupDefinition reports whether a value under a group name is one
+// Ansible's yaml plugin accepts: a mapping, or null for a group that holds
+// nothing yet. A scalar or a sequence is neither.
+func isYAMLGroupDefinition(node any) bool {
+	if node == nil {
+		return true
+	}
+
+	_, ok := normalizeMapping(node)
+
+	return ok
 }
 
 // hostPatternsOf reads the patterns of a YAML "hosts" node. The Ansible YAML

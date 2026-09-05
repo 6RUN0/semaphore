@@ -717,3 +717,91 @@ func TestParseINIInventoryStripsHostPort(t *testing.T) {
 		})
 	}
 }
+
+// Ansible's ini plugin matches a section header against
+// ^\[([^:\]\s]+)(?::(\w+))?\]$ and then refuses a tag other than hosts,
+// children or vars, so both a malformed name and an unknown suffix are parse
+// errors there. Accepting them here would invent a group out of a typo and
+// send the hosts below it to a name no play addresses.
+func TestParseINIInventoryRejectsInvalidSectionHeader(t *testing.T) {
+	tests := []struct {
+		name    string
+		content string
+		message string
+	}{
+		{"space in the group name", "[a b]\nhost1\n", "[a b]"},
+		{"unknown suffix", "[web:foo]\nweb01\n", "[web:foo]"},
+		{"empty group name", "[]\nhost1\n", "[]"},
+		{"suffix chain", "[a:b:c]\nhost1\n", "[a:b:c]"},
+		{"padded group name", "[ web ]\nhost1\n", "[ web ]"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			_, err := ParseINIInventory(tt.content)
+
+			require.Error(t, err)
+			assert.Contains(t, err.Error(), tt.message)
+		})
+	}
+}
+
+// The counterpart of the refusal above: everything Ansible's group name class
+// allows keeps working, suffix or no suffix.
+func TestParseINIInventoryAcceptsValidSectionHeader(t *testing.T) {
+	tests := []struct {
+		name     string
+		content  string
+		hosts    []string
+		groups   []string
+		children []string
+	}{
+		{"plain group", "[web]\nweb01\n", []string{"web01"}, []string{"web"}, []string{}},
+		{"punctuation in the name", "[db-01.prod_a]\nhost1\n", []string{"host1"}, []string{"db-01.prod_a"}, []string{}},
+		{"vars suffix", "[web]\nweb01\n\n[web:vars]\nenv=prod\n", []string{"web01"}, []string{"web"}, []string{}},
+		{"children suffix", "[web]\nweb01\n\n[prod:children]\nweb\n", []string{"web01"}, []string{"prod", "web"}, []string{"web"}},
+		{"hosts suffix", "[web:hosts]\nweb01\n", []string{"web01"}, []string{"web"}, []string{}},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			parsed, err := ParseINIInventory(tt.content)
+
+			require.NoError(t, err)
+			assert.Equal(t, tt.hosts, parsed.Hosts)
+			assert.Equal(t, tt.groups, inventoryGroupNames(parsed))
+			assert.Equal(t, tt.children, parsed.Groups[0].Children)
+		})
+	}
+}
+
+// inventoryGroupNames reduces a parse result to the group names it declares,
+// in the order build() emits them.
+func inventoryGroupNames(parsed InventoryHosts) []string {
+	names := make([]string, 0, len(parsed.Groups))
+
+	for _, group := range parsed.Groups {
+		names = append(names, group.Name)
+	}
+
+	return names
+}
+
+// Ansible's yaml plugin creates a group only when the top-level value is a
+// mapping or null; anything else it drops with "Skipping '%s' as this is not a
+// valid group definition". Declaring the group anyway puts a name in the
+// picker that selects nothing and that no play can address.
+func TestParseYAMLInventorySkipsInvalidGroupDefinitions(t *testing.T) {
+	parsed, err := ParseYAMLInventory(`web:
+  hosts:
+    web01:
+empty:
+scalar: 1
+sequence:
+  - a
+`)
+
+	require.NoError(t, err)
+	assert.Equal(t, []string{"web01"}, parsed.Hosts)
+	assert.Equal(t, []string{"empty", "web"}, inventoryGroupNames(parsed))
+}

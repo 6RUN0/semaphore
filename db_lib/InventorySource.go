@@ -295,7 +295,7 @@ func (w *inventorySourceWalker) readFile(path string, reported string, info os.F
 		return InventoryExecutableError{Path: reported}
 	}
 
-	if mapping, ok := yamlInventoryMapping(content); ok {
+	if mapping, ok := yamlInventoryMapping(content, filepath.Ext(path)); ok {
 		return feedYAMLMapping(w.builder, mapping)
 	}
 
@@ -317,20 +317,75 @@ func ansibleIgnoresEntry(name string) bool {
 	return isAlwaysIgnoredEntry(name) || hasIgnoredInventoryExt(name)
 }
 
-// yamlInventoryMapping picks the format the way it can be picked without
-// running Ansible's plugin chain: a YAML inventory is always a mapping at its
-// root, and an INI one never parses as one.
+// yamlInventoryMapping picks the format the way Ansible picks a plugin,
+// without running its plugin chain.
+//
+// The extension decides first. The yaml plugin's verify_file claims a file
+// only when the extension is empty or one of YAML_FILENAME_EXTENSIONS, so an
+// inventory called hosts.ini never reaches it however it is written, and one
+// called hosts.yml never reaches the ini plugin.
+//
+// Where the extension leaves the choice open, the content decides. A YAML
+// inventory is a mapping at its root whose values are group definitions, and a
+// document declaring not one of those declares no group at all: reading it as
+// INI is the only chance its lines have of naming a host. "web1 ansible_host:
+// 10.0.0.1" is the case that matters, an INI host entry that also decodes as a
+// one-key mapping whose value is a scalar. Requiring the root to be a mapping
+// and nothing more turned it into the group "web1 ansible_host" and lost the
+// host.
+//
+// This is where the choice departs from Ansible, which stays with the yaml
+// plugin once verify_file has claimed the file and reports such a document as
+// an empty inventory. An empty host list here reads as "this repository has no
+// hosts" rather than as "the file was read the wrong way", so the INI reading
+// is preferred over a silent nothing.
 //
 // The decoded mapping is returned rather than only the verdict, because the
 // caller would otherwise unmarshal the same bytes again — and a directory
 // inventory is up to maxInventorySourceFiles files, each read under the
 // checkout lock on a request path.
-func yamlInventoryMapping(content []byte) (map[string]any, bool) {
+func yamlInventoryMapping(content []byte, ext string) (map[string]any, bool) {
+	if ext != "" && !isYAMLInventoryExt(ext) {
+		return nil, false
+	}
+
 	var root any
 
 	if err := yaml.Unmarshal(content, &root); err != nil {
 		return nil, false
 	}
 
-	return normalizeMapping(root)
+	mapping, ok := normalizeMapping(root)
+	if !ok {
+		return nil, false
+	}
+
+	if ext != "" {
+		return mapping, true
+	}
+
+	for _, node := range mapping {
+		if isYAMLGroupDefinition(node) {
+			return mapping, true
+		}
+	}
+
+	return nil, false
+}
+
+// isYAMLInventoryExt matches YAML_FILENAME_EXTENSIONS as it resolves by
+// default in ansible-core 2.21.3. Re-derive after an Ansible upgrade with:
+//
+//	python -c "from ansible import constants as C; print(C.YAML_FILENAME_EXTENSIONS)"
+//
+// The comparison is case sensitive because Ansible's is: os.path.splitext
+// keeps the case and the constant holds lowercase entries, so hosts.YML goes
+// to the ini plugin there.
+func isYAMLInventoryExt(ext string) bool {
+	switch ext {
+	case ".yml", ".yaml", ".json":
+		return true
+	default:
+		return false
+	}
 }
