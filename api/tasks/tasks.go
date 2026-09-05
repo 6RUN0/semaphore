@@ -15,11 +15,13 @@ func TaskMiddleware(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		taskID, err := helpers.GetIntParam("task_id", w, r)
 		if err != nil {
-			log.WithError(err).WithFields(log.Fields{
-				"task_id": taskID,
-				"context": "task_api",
-			}).Debug("Invalid task_id parameter in request URL")
-			helpers.WriteErrorStatus(w, err.Error(), http.StatusBadRequest)
+			// GetIntParam has already written the response: a redirect to /404
+			// for a browser, a bare 400 otherwise. Writing a body on top of that
+			// produces a second header write, and the parser error quotes the
+			// raw path segment, so neither the client nor the log gets it.
+			log.WithField("context", "task_api").
+				Debug("Invalid task_id parameter in request URL")
+			return
 		}
 
 		r = helpers.SetContextValue(r, "task_id", taskID)
