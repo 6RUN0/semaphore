@@ -25,6 +25,7 @@ runs:
         PRO_REPO: https://${{ inputs.gh_token }}@github.com/semaphoreui/semaphorepro-module.git
         BRANCH_NAME: ${{ github.head_ref || (github.ref_type == 'branch' && github.ref_name) || '' }}
       run: |
+        set -euo pipefail
         if [ -n "$BRANCH_NAME" ]; then
           CANDIDATES="$BRANCH_NAME"
         else
@@ -32,11 +33,21 @@ runs:
           # develop checked last.
           ALL=$(git branch -r --contains HEAD --format='%(refname:short)' | sed -n 's#^origin/##p' | grep -vx 'HEAD' || true)
           CANDIDATES=$( { echo "$ALL" | grep -vx develop || true; echo "$ALL" | grep -x develop || true; } )
+          if [ -z "$CANDIDATES" ]; then
+            # No candidate means the tagged commit is on no known branch, usually a
+            # checkout without full history. Falling back to main here would ship a
+            # release built against an unrelated pro_impl branch.
+            echo "No origin branch contains the tagged commit; checkout needs fetch-depth: 0" >&2
+            exit 1
+          fi
         fi
-        PRO_HEADS=$(git ls-remote --heads "$PRO_REPO" | sed 's#.*refs/heads/##' || true)
+        # A failing ls-remote (expired token, network) must stop the build: silently
+        # keeping main would produce a release built against the wrong pro_impl branch.
+        PRO_HEADS=$(git ls-remote --heads "$PRO_REPO" | sed 's#.*refs/heads/##')
         PRO_BRANCH=main
         for c in $CANDIDATES; do
-          if echo "$PRO_HEADS" | grep -qx -- "$c"; then
+          # -F: a branch name is a literal, not a regex. Without it "v1.2" matches "v1x2".
+          if echo "$PRO_HEADS" | grep -qxF -- "$c"; then
             PRO_BRANCH="$c"
             break
           fi
