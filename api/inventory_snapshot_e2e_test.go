@@ -44,6 +44,9 @@ func newSnapshotAPI(t *testing.T) *snapshotAPI {
 		SQLite:    &util.DbConfig{Hostname: ":memory:"},
 		Dialect:   "sqlite",
 		Debugging: &util.DebuggingConfig{},
+		// ConfigInit fills this from the default tag; a hand-built config
+		// leaves it at 0 and git aborts on "--jobs 0".
+		GitSubmoduleJobs: 1,
 		Log: &util.ConfigLog{
 			Events: &util.EventLogType{},
 			Tasks:  &util.TaskLogType{},

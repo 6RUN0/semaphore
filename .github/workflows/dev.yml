@@ -50,10 +50,18 @@ jobs:
       # with an empty token, fails, and takes every job downstream of this one
       # with it. A fork builds against the open-source stub instead, which the
       # dredd hooks detect at runtime and skip the workflow tests for.
+      - name: Determine PRO branch
+        if: github.event_name == 'push' && github.repository_owner == 'semaphoreui'
+        uses: ./.github/actions/determine-pro-branch
+        with:
+          gh_token: ${{ secrets.GH_TOKEN }}
+
       - name: Add PRO implementation
         if: github.event_name == 'push' && github.repository_owner == 'semaphoreui'
+        env:
+          PRO_REPO: https://${{ secrets.GH_TOKEN }}@github.com/semaphoreui/semaphorepro-module.git
         run: |
-          git clone -b main https://${{ secrets.GH_TOKEN }}@github.com/semaphoreui/semaphorepro-module.git pro_impl
+          git clone -b "$PRO_BRANCH" "$PRO_REPO" pro_impl
           go work init . ./pro_impl
 
       - name: Run build

@@ -69,6 +69,9 @@ func setupSourceConfig(t *testing.T) {
 
 	util.Config = &util.ConfigType{
 		TmpPath: t.TempDir(),
+		// ConfigInit fills this from the default tag; a hand-built config
+		// leaves it at 0 and git aborts on "--jobs 0".
+		GitSubmoduleJobs: 1,
 		Log: &util.ConfigLog{
 			Events: &util.EventLogType{},
 			Tasks:  &util.TaskLogType{},
