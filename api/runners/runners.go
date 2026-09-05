@@ -117,34 +117,46 @@ func NewRunnerController(runnerRepo db.RunnerManager, taskPool *tasks.TaskPool, 
 	}
 }
 
+// applyStartedAtHeader overwrites the runner's process start time with the one
+// it reports on every request. The value changes on every restart and is
+// persisted next to "touched", so the task reconciler can detect runners that
+// restarted and lost their in-memory job pool.
+//
+// A missing or unparsable header leaves the value loaded from the database in
+// place: TouchRunner persists whatever it is given, and a zeroed start time
+// would look like a runner that has never restarted.
+func applyStartedAtHeader(r *http.Request, runner *db.Runner) {
+	v := r.Header.Get("X-Runner-Started-At")
+	if v == "" {
+		return
+	}
+
+	startedAt, err := time.Parse(time.RFC3339, v)
+	if err != nil {
+		log.WithFields(log.Fields{
+			"runner_id": runner.ID,
+			"context":   "runner",
+		}).WithError(err).Warn("invalid X-Runner-Started-At header")
+		return
+	}
+
+	runner.StartedAt = &startedAt
+}
+
 func (c *RunnerController) GetRunner(w http.ResponseWriter, r *http.Request) {
 	runner := helpers.GetFromContext(r, "runner").(db.Runner)
 
 	clearCache := false
 
-	// The runner reports its process start time on every poll. It changes on
-	// every restart and is persisted next to "touched", so the task reconciler
-	// can detect runners that restarted and lost their in-memory job pool.
-	if v := r.Header.Get("X-Runner-Started-At"); v != "" {
-		if startedAt, parseErr := time.Parse(time.RFC3339, v); parseErr == nil {
-			runner.StartedAt = &startedAt
-		} else {
-			log.WithFields(log.Fields{
-				"runner_id": runner.ID,
-				"context":   "runner",
-			}).WithError(parseErr).Warn("invalid X-Runner-Started-At header")
-		}
-	}
-
-	if err := c.runnerRepo.TouchRunner(runner); err != nil {
-		log.WithFields(log.Fields{
-			"runner_id": runner.ID,
-			"context":   "runner",
-		}).WithError(err).Error("runner touch failed")
-		helpers.WriteError(w, err)
-		return
-	}
-
+	// The poll deliberately leaves the runner row alone. The progress report
+	// is the heartbeat: it arrives every second and carries the same
+	// X-Runner-Started-At header, so touching here as well would cost
+	// 1 + 1/check_interval writes per second per runner instead of 1, without
+	// making either "touched" or "started_at" any fresher.
+	//
+	// The comparison below reads the row the middleware loaded. TouchRunner
+	// takes its argument by value and never updated that copy, so dropping the
+	// call leaves the cache-clean signal unchanged.
 	if runner.CleaningRequested != nil && (runner.Touched == nil || runner.CleaningRequested.After(*runner.Touched)) {
 		clearCache = true
 	}
@@ -368,6 +380,33 @@ func (c *RunnerController) UpdateRunner(w http.ResponseWriter, r *http.Request) 
 			"error": "Invalid format",
 		})
 		return
+	}
+
+	// The progress report is the runner's only heartbeat. It is the only
+	// request a runner is guaranteed to send on a fixed one second cadence,
+	// while the job poll honours check_interval_seconds and can therefore be
+	// spaced further apart than RunnersOfflineTimeout, which would take a
+	// healthy runner out of the dispatch rotation between polls.
+	//
+	// The start time is applied here rather than on the poll for the same
+	// reason: a restart would otherwise reach the row only once per check
+	// interval, while every heartbeat in between rewrote the stale value.
+	//
+	// The runner comes from the middleware, which loads every column, so
+	// started_at is carried through unchanged when the header is absent:
+	// TouchRunner writes it next to touched, and a zeroed one would erase the
+	// restart marker the task reconciler reads.
+	//
+	// A touch that fails is logged and not returned. The same request carries
+	// the task logs and the task status, and sendProgress treats any status
+	// >= 400 as a total failure and never resends the report.
+	applyStartedAtHeader(r, &runner)
+
+	if err := c.runnerRepo.TouchRunner(runner); err != nil {
+		log.WithFields(log.Fields{
+			"runner_id": runner.ID,
+			"context":   "runner",
+		}).WithError(err).Error("runner touch failed")
 	}
 
 	taskPool := c.taskPool

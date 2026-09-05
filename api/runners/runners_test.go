@@ -3,11 +3,13 @@ package runners
 import (
 	"bytes"
 	"encoding/json"
+	"errors"
 	"io"
 	"net/http"
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/semaphoreui/semaphore/api/helpers"
 	"github.com/semaphoreui/semaphore/db"
@@ -81,7 +83,7 @@ func TestUpdateRunner_StoppedTaskReportedAsTerminated(t *testing.T) {
 		nil,
 		nil,
 	)
-	ctrl := NewRunnerController(nil, &pool, nil, nil)
+	ctrl := NewRunnerController(&touchRecordingRunnerRepo{}, &pool, nil, nil)
 
 	runnerID := 1
 
@@ -131,7 +133,7 @@ func TestUpdateRunner_UnknownTaskReportedAsTerminated(t *testing.T) {
 		nil,
 		nil,
 	)
-	ctrl := NewRunnerController(nil, &pool, nil, nil)
+	ctrl := NewRunnerController(&touchRecordingRunnerRepo{}, &pool, nil, nil)
 
 	req := newProgressRequest(t, store, db.Runner{ID: 1}, runners.RunnerProgress{
 		Jobs: []runners.JobProgress{{
@@ -164,7 +166,7 @@ func TestUpdateRunner_ReassignedTaskReportedAsTerminated(t *testing.T) {
 		nil,
 		nil,
 	)
-	ctrl := NewRunnerController(nil, &pool, nil, nil)
+	ctrl := NewRunnerController(&touchRecordingRunnerRepo{}, &pool, nil, nil)
 
 	oldRunnerID := 1
 	newRunnerID := 2
@@ -217,7 +219,7 @@ func TestUpdateRunner_RunningTaskAcceptedWithoutTermination(t *testing.T) {
 		nil,
 		nil,
 	)
-	ctrl := NewRunnerController(nil, &pool, nil, nil)
+	ctrl := NewRunnerController(&touchRecordingRunnerRepo{}, &pool, nil, nil)
 
 	runnerID := 1
 
@@ -417,7 +419,7 @@ func TestUpdateRunner_StoresTheResolvedInventoryOfAStoppedTask(t *testing.T) {
 		nil,
 		nil,
 	)
-	ctrl := NewRunnerController(nil, &pool, nil, nil)
+	ctrl := NewRunnerController(&touchRecordingRunnerRepo{}, &pool, nil, nil)
 
 	tr := tasks.NewTaskRunner(task, &pool, "", nil)
 	tr.Inventory = inventory
@@ -463,4 +465,330 @@ func TestRegistrationBodyLimitStopsAnEndlessBody(t *testing.T) {
 	assert.Equal(t, MaxRunnerRegistrationBodySize, read)
 	assert.Less(t, MaxRunnerRegistrationBodySize, MaxRunnerReportBodySize,
 		"a registration is a handful of short fields, not a progress report")
+}
+
+// touchRecordingRunnerRepo records the TouchRunner calls a handler makes. Only
+// that method is exercised, so the rest of the interface is left to panic if
+// the handler ever reaches for it.
+type touchRecordingRunnerRepo struct {
+	db.RunnerManager
+	touched  []db.Runner
+	touchErr error
+}
+
+func (r *touchRecordingRunnerRepo) TouchRunner(runner db.Runner) error {
+	r.touched = append(r.touched, runner)
+	return r.touchErr
+}
+
+// The progress report is the only request an already registered runner sends
+// while it has work, and "touched" is what keeps the runner in the dispatch
+// rotation. Without a touch here a check interval above RunnersOfflineTimeout
+// makes a busy runner look dead between polls.
+func TestUpdateRunner_ProgressTouchesTheRunner(t *testing.T) {
+	prevCfg := util.Config
+	t.Cleanup(func() { util.Config = prevCfg })
+
+	store := sql.InitConfigCreateTestStore()
+
+	pool := tasks.CreateTaskPool(
+		store,
+		tasks.NewMemoryTaskStateStore(),
+		nil,
+		nil,
+		nil,
+		nil,
+		nil,
+		nil,
+		nil,
+	)
+
+	repo := &touchRecordingRunnerRepo{}
+	ctrl := NewRunnerController(repo, &pool, nil, nil)
+
+	runnerID := 1
+
+	tr := tasks.NewTaskRunner(db.Task{
+		ID:        11,
+		ProjectID: 1,
+		RunnerID:  &runnerID,
+		Status:    task_logger.TaskRunningStatus,
+	}, &pool, "", nil)
+	pool.StateStore().SetRunning(tr)
+
+	startedAt := tz.Now()
+	runner := db.Runner{ID: runnerID, StartedAt: &startedAt}
+
+	req := newProgressRequest(t, store, runner, runners.RunnerProgress{
+		Jobs: []runners.JobProgress{{
+			ID:     11,
+			Status: task_logger.TaskRunningStatus,
+		}},
+	})
+	w := httptest.NewRecorder()
+
+	ctrl.UpdateRunner(w, req)
+
+	require.Equal(t, http.StatusOK, w.Code)
+	require.Len(t, repo.touched, 1)
+	assert.Equal(t, runnerID, repo.touched[0].ID)
+
+	// TouchRunner writes started_at along with touched, so the value the
+	// middleware loaded must reach it unchanged; a zeroed one would erase the
+	// restart marker the task reconciler reads.
+	assert.Equal(t, &startedAt, repo.touched[0].StartedAt)
+}
+
+// An idle runner reports no jobs at all, and that report is the only heartbeat
+// it sends between job checks.
+func TestUpdateRunner_EmptyProgressTouchesTheRunner(t *testing.T) {
+	prevCfg := util.Config
+	t.Cleanup(func() { util.Config = prevCfg })
+
+	store := sql.InitConfigCreateTestStore()
+
+	pool := tasks.CreateTaskPool(
+		store,
+		tasks.NewMemoryTaskStateStore(),
+		nil,
+		nil,
+		nil,
+		nil,
+		nil,
+		nil,
+		nil,
+	)
+
+	repo := &touchRecordingRunnerRepo{}
+	ctrl := NewRunnerController(repo, &pool, nil, nil)
+
+	req := newProgressRequest(t, store, db.Runner{ID: 3}, runners.RunnerProgress{})
+	w := httptest.NewRecorder()
+
+	ctrl.UpdateRunner(w, req)
+
+	require.Equal(t, http.StatusNoContent, w.Code)
+	require.Len(t, repo.touched, 1)
+	assert.Equal(t, 3, repo.touched[0].ID)
+}
+
+// A heartbeat that cannot be written is worth less than the report carrying
+// it: rejecting the request would drop the task logs and the status too, and
+// the runner does not resend them.
+func TestUpdateRunner_TouchFailureDoesNotRejectTheProgress(t *testing.T) {
+	prevCfg := util.Config
+	t.Cleanup(func() { util.Config = prevCfg })
+
+	store := sql.InitConfigCreateTestStore()
+
+	pool := tasks.CreateTaskPool(
+		store,
+		tasks.NewMemoryTaskStateStore(),
+		nil,
+		nil,
+		nil,
+		nil,
+		nil,
+		nil,
+		nil,
+	)
+
+	repo := &touchRecordingRunnerRepo{touchErr: errors.New("database is unreachable")}
+	ctrl := NewRunnerController(repo, &pool, nil, nil)
+
+	runnerID := 4
+
+	tr := tasks.NewTaskRunner(db.Task{
+		ID:        12,
+		ProjectID: 1,
+		RunnerID:  &runnerID,
+		Status:    task_logger.TaskStartingStatus,
+	}, &pool, "", nil)
+	pool.StateStore().SetRunning(tr)
+
+	// The reported status stays non-terminal on purpose. A terminal one makes
+	// the handler finalize the task in a goroutine that outlives the test and
+	// reads util.Config while the next test replaces it, which the race
+	// detector reports; the touch failure under test is independent of that.
+	req := newProgressRequest(t, store, db.Runner{ID: runnerID}, runners.RunnerProgress{
+		Jobs: []runners.JobProgress{{
+			ID:     12,
+			Status: task_logger.TaskRunningStatus,
+		}},
+	})
+	w := httptest.NewRecorder()
+
+	ctrl.UpdateRunner(w, req)
+
+	require.Equal(t, http.StatusOK, w.Code)
+	assert.Empty(t, decodeProgressResponse(t, w).TerminatedJobs)
+	assert.Equal(t, task_logger.TaskRunningStatus, tr.Task.Status)
+}
+
+// newPollRequest builds the job poll a runner sends on its check interval.
+func newPollRequest(t *testing.T, store db.Store, runner db.Runner) *http.Request {
+	t.Helper()
+
+	req := httptest.NewRequest(http.MethodGet, "/api/internal/runners", nil)
+	req = helpers.SetContextValue(req, "store", store)
+	req = helpers.SetContextValue(req, "runner", runner)
+	return req
+}
+
+// The runner reports its process start time on every request, and the restart
+// marker is only useful if it reaches the row on the heartbeat cadence: the
+// job poll honours check_interval_seconds, so a restart would otherwise stay
+// invisible for a whole interval while the progress report kept rewriting the
+// stale value.
+func TestUpdateRunner_ProgressAppliesTheStartedAtHeader(t *testing.T) {
+	prevCfg := util.Config
+	t.Cleanup(func() { util.Config = prevCfg })
+
+	store := sql.InitConfigCreateTestStore()
+
+	pool := tasks.CreateTaskPool(
+		store,
+		tasks.NewMemoryTaskStateStore(),
+		nil,
+		nil,
+		nil,
+		nil,
+		nil,
+		nil,
+		nil,
+	)
+
+	repo := &touchRecordingRunnerRepo{}
+	ctrl := NewRunnerController(repo, &pool, nil, nil)
+
+	stored := tz.Now().Add(-time.Hour)
+	restarted := tz.Now()
+
+	req := newProgressRequest(t, store, db.Runner{ID: 5, StartedAt: &stored}, runners.RunnerProgress{})
+	req.Header.Set("X-Runner-Started-At", restarted.Format(time.RFC3339))
+	w := httptest.NewRecorder()
+
+	ctrl.UpdateRunner(w, req)
+
+	require.Equal(t, http.StatusNoContent, w.Code)
+	require.Len(t, repo.touched, 1)
+	require.NotNil(t, repo.touched[0].StartedAt)
+	assert.Equal(t, restarted.Format(time.RFC3339), repo.touched[0].StartedAt.Format(time.RFC3339))
+}
+
+// A header the server cannot parse must not become a zero start time: the
+// reconciler compares it against the task start, and a zeroed one would look
+// like a runner that has never restarted.
+func TestUpdateRunner_InvalidStartedAtHeaderKeepsTheStoredValue(t *testing.T) {
+	prevCfg := util.Config
+	t.Cleanup(func() { util.Config = prevCfg })
+
+	store := sql.InitConfigCreateTestStore()
+
+	pool := tasks.CreateTaskPool(
+		store,
+		tasks.NewMemoryTaskStateStore(),
+		nil,
+		nil,
+		nil,
+		nil,
+		nil,
+		nil,
+		nil,
+	)
+
+	repo := &touchRecordingRunnerRepo{}
+	ctrl := NewRunnerController(repo, &pool, nil, nil)
+
+	stored := tz.Now()
+
+	req := newProgressRequest(t, store, db.Runner{ID: 6, StartedAt: &stored}, runners.RunnerProgress{})
+	req.Header.Set("X-Runner-Started-At", "not-a-timestamp")
+	w := httptest.NewRecorder()
+
+	ctrl.UpdateRunner(w, req)
+
+	require.Equal(t, http.StatusNoContent, w.Code)
+	require.Len(t, repo.touched, 1)
+	assert.Equal(t, &stored, repo.touched[0].StartedAt)
+}
+
+// The progress report already touches the runner every second and carries the
+// same start time, so touching on the poll as well only multiplies writes to
+// the runner row without making the heartbeat any fresher.
+func TestGetRunner_PollDoesNotTouchTheRunner(t *testing.T) {
+	prevCfg := util.Config
+	t.Cleanup(func() { util.Config = prevCfg })
+
+	store := sql.InitConfigCreateTestStore()
+
+	pool := tasks.CreateTaskPool(
+		store,
+		tasks.NewMemoryTaskStateStore(),
+		nil,
+		nil,
+		nil,
+		nil,
+		nil,
+		nil,
+		nil,
+	)
+
+	repo := &touchRecordingRunnerRepo{}
+	ctrl := NewRunnerController(repo, &pool, nil, nil)
+
+	req := newPollRequest(t, store, db.Runner{ID: 7})
+	w := httptest.NewRecorder()
+
+	ctrl.GetRunner(w, req)
+
+	require.Equal(t, http.StatusOK, w.Code)
+	assert.Empty(t, repo.touched)
+}
+
+// Dropping the touch from the poll must not change how a cache clean is
+// signalled: the comparison reads the row the middleware loaded, which the
+// touch never updated in place anyway.
+func TestGetRunner_PollStillReportsARequestedCacheClean(t *testing.T) {
+	prevCfg := util.Config
+	t.Cleanup(func() { util.Config = prevCfg })
+
+	store := sql.InitConfigCreateTestStore()
+
+	pool := tasks.CreateTaskPool(
+		store,
+		tasks.NewMemoryTaskStateStore(),
+		nil,
+		nil,
+		nil,
+		nil,
+		nil,
+		nil,
+		nil,
+	)
+
+	repo := &touchRecordingRunnerRepo{}
+	ctrl := NewRunnerController(repo, &pool, nil, nil)
+
+	touched := tz.Now().Add(-time.Hour)
+	cleaningRequested := tz.Now()
+	projectID := 9
+
+	req := newPollRequest(t, store, db.Runner{
+		ID:                8,
+		ProjectID:         &projectID,
+		Touched:           &touched,
+		CleaningRequested: &cleaningRequested,
+	})
+	w := httptest.NewRecorder()
+
+	ctrl.GetRunner(w, req)
+
+	require.Equal(t, http.StatusOK, w.Code)
+
+	var state runners.RunnerState
+	require.NoError(t, json.Unmarshal(w.Body.Bytes(), &state))
+	assert.True(t, state.ClearCache)
+	require.NotNil(t, state.CacheCleanProjectID)
+	assert.Equal(t, projectID, *state.CacheCleanProjectID)
 }

@@ -272,6 +272,35 @@ func (p *JobPool) Unregister() (err error) {
 // runner is still alive.
 const runnerProgressInterval = time.Second
 
+// jobCheckTolerance is how far before its deadline a job check may run. The
+// check can only be taken on a progress tick, and the moment the decision is
+// reached drifts by however long the progress report before it took, so a
+// deadline compared strictly would be missed by a tick arriving a few
+// milliseconds early and postponed by a whole progress interval. At the
+// default check interval, which equals the progress interval, that loses
+// roughly every second check. Half a progress interval gives every deadline
+// exactly one tick.
+const jobCheckTolerance = runnerProgressInterval / 2
+
+// jobCheckDue reports whether the job check due at deadline has come by now,
+// and returns the deadline to use afterwards. Deadlines advance by whole
+// intervals from the previous deadline rather than from now, so a slow cycle
+// does not push the following checks out; falling behind by more than one
+// interval re-anchors on now instead of replaying every missed deadline as a
+// burst. The zero deadline is always due, which is how the first check runs.
+func jobCheckDue(now, deadline time.Time, interval time.Duration) (due bool, next time.Time) {
+	if now.Before(deadline.Add(-jobCheckTolerance)) {
+		return false, deadline
+	}
+
+	next = deadline.Add(interval)
+	if !next.After(now) {
+		next = now.Add(interval)
+	}
+
+	return true, next
+}
+
 func (p *JobPool) Run() {
 	launched := false
 
@@ -290,8 +319,10 @@ func (p *JobPool) Run() {
 
 	// The progress report doubles as the runner's heartbeat, and the server marks
 	// a runner offline after RunnersOfflineTimeout (120s by default), so its
-	// cadence is fixed. Only the job check honours the configured interval.
-	lastJobCheck := time.Time{}
+	// cadence is fixed. Only the job check honours the configured interval,
+	// and it rides the same ticker: nextJobCheck is the deadline of the check
+	// that tick owes, and the zero value makes the first tick owe one.
+	nextJobCheck := time.Time{}
 
 	queueTicker := time.NewTicker(5 * time.Second)
 	requestTimer := time.NewTicker(runnerProgressInterval)
@@ -430,8 +461,10 @@ func (p *JobPool) Run() {
 					os.Exit(0)
 				}
 
-				if time.Since(lastJobCheck) >= checkInterval {
-					lastJobCheck = time.Now()
+				due, next := jobCheckDue(time.Now(), nextJobCheck, checkInterval)
+				nextJobCheck = next
+
+				if due {
 					p.checkNewJobs()
 				}
 			}()

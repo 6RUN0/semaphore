@@ -370,3 +370,119 @@ func TestJobPool_checkNewJobs_ExecutorErrorWithoutCacheCleanProjectID(t *testing
 	})
 	assert.Equal(t, 0, p.queueLen())
 }
+
+func TestJobCheckDue(t *testing.T) {
+	base := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
+
+	tests := []struct {
+		name     string
+		now      time.Time
+		deadline time.Time
+		interval time.Duration
+		due      bool
+		next     time.Time
+	}{
+		{
+			name: "the zero deadline fires at once",
+			now:  base, deadline: time.Time{}, interval: time.Second,
+			due: true, next: base.Add(time.Second),
+		},
+		{
+			name: "on the deadline",
+			now:  base.Add(time.Second), deadline: base.Add(time.Second), interval: time.Second,
+			due: true, next: base.Add(2 * time.Second),
+		},
+		{
+			name: "a tick a little early still fires and keeps the grid",
+			now:  base.Add(900 * time.Millisecond), deadline: base.Add(time.Second), interval: time.Second,
+			due: true, next: base.Add(2 * time.Second),
+		},
+		{
+			name: "a tick more than the tolerance early does not fire",
+			now:  base.Add(400 * time.Millisecond), deadline: base.Add(time.Second), interval: time.Second,
+			due: false, next: base.Add(time.Second),
+		},
+		{
+			name: "a late tick does not push the next deadline out",
+			now:  base.Add(1200 * time.Millisecond), deadline: base.Add(time.Second), interval: time.Second,
+			due: true, next: base.Add(2 * time.Second),
+		},
+		{
+			name: "a stall longer than the interval re-anchors instead of replaying",
+			now:  base.Add(time.Minute), deadline: base.Add(time.Second), interval: time.Second,
+			due: true, next: base.Add(time.Minute + time.Second),
+		},
+		{
+			name: "a long interval is not fired by an ordinary tick",
+			now:  base.Add(time.Second), deadline: base.Add(5 * time.Second), interval: 5 * time.Second,
+			due: false, next: base.Add(5 * time.Second),
+		},
+		{
+			name: "a long interval fires on the tick nearest its deadline",
+			now:  base.Add(4700 * time.Millisecond), deadline: base.Add(5 * time.Second), interval: 5 * time.Second,
+			due: true, next: base.Add(10 * time.Second),
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			due, next := jobCheckDue(tt.now, tt.deadline, tt.interval)
+
+			assert.Equal(t, tt.due, due)
+			assert.Equal(t, tt.next, next)
+		})
+	}
+}
+
+// The job check runs on the progress ticker, so at the default interval the two
+// share a period and every tick owes exactly one check. The tick does not
+// arrive on an exact second: the progress report before it takes a varying
+// amount of time, so the moment the decision is taken drifts back and forth.
+// A rule measuring the time elapsed since the previous check loses a check
+// whenever that delay shrinks, which is about every second tick.
+func TestJobCheckDueNeverSkipsAtTheDefaultInterval(t *testing.T) {
+	const ticks = 500
+	const interval = time.Second
+	// The progress report round trip of a healthy runner, so the largest
+	// delay between a tick and the decision that follows it.
+	const maxDelay = 300 * time.Millisecond
+
+	base := time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC)
+
+	delays := map[string]func(i int) time.Duration{
+		"no delay":       func(int) time.Duration { return 0 },
+		"constant delay": func(int) time.Duration { return maxDelay },
+		"alternating extremes": func(i int) time.Duration {
+			if i%2 == 0 {
+				return maxDelay
+			}
+			return 0
+		},
+		"sawtooth": func(i int) time.Duration {
+			return time.Duration(i%7) * maxDelay / 6
+		},
+		"pseudorandom": func(i int) time.Duration {
+			return time.Duration((i*2654435761)%int(maxDelay+1)) * time.Nanosecond
+		},
+	}
+
+	for name, delay := range delays {
+		t.Run(name, func(t *testing.T) {
+			deadline := time.Time{}
+			checks := 0
+
+			for i := range ticks {
+				now := base.Add(time.Duration(i)*interval + delay(i))
+
+				due, next := jobCheckDue(now, deadline, interval)
+				deadline = next
+
+				if due {
+					checks++
+				}
+			}
+
+			assert.Equal(t, ticks, checks, "every tick must fire a job check")
+		})
+	}
+}
