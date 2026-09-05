@@ -438,8 +438,11 @@ func validateMutationResult(res sql.Result, err error) error {
 // requireAffectedRow turns a scoped DELETE that matched nothing into
 // ErrNotFound, so callers can tell "wrong project" from "done". DELETE
 // only: after UPDATE, MySQL reports changed rows rather than matched rows
-// (the DSN sets no clientFoundRows), so an update to identical values
-// would be misreported as missing.
+// unless clientFoundRows is on, so an update to identical values would be
+// misreported as missing. The flag is off by default and nothing here sets
+// it, but the db options from the config are merged into the same DSN
+// parameter map, so an operator can turn it on and flip UPDATE to matched
+// rows for the whole process.
 func requireAffectedRow(res sql.Result) error {
 	n, err := res.RowsAffected()
 	if err != nil {
