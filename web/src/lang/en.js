@@ -408,6 +408,7 @@ export default {
   noValues: 'No values',
   addArg: 'Add arg',
 
+  advancedOptions: 'Advanced options',
   runnerCheckInterval: 'Check interval (seconds)',
   runnerCheckIntervalHint: 'How often the runner checks for new jobs.',
   runnerCheckIntervalInvalid: 'Enter a whole number of seconds, 1 or more.',

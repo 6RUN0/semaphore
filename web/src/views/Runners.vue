@@ -58,30 +58,12 @@
 
           <h2 class="mt-8 mb-4">{{ $t('howToRegister') }}</h2>
 
-          <v-checkbox
-              v-model="advancedOptions"
-              label="Advanced options"
-            />
-
-          <HighlightedCard
-              v-if="advancedOptions"
-              tick-left="80px"
-              style="width: 350px;"
-          >
-            <template>
-            <v-text-field
-                v-model="checkIntervalSeconds"
-                type="number"
-                min="1"
-                :label="$t('runnerCheckInterval')"
-                :hint="$t('runnerCheckIntervalHint')"
-                :rules="[checkIntervalRule]"
-                persistent-hint
-                dense
-                outlined
-            />
-            </template>
-          </HighlightedCard>
+          <RunnerAdvancedOptions
+              :enabled="advancedOptions"
+              :check-interval="checkIntervalSeconds"
+              @update:enabled="advancedOptions = $event"
+              @update:check-interval="checkIntervalSeconds = $event"
+          />
 
           <v-tabs v-model="registerTab" :show-arrows="false">
             <v-tab key="env">Env Vars</v-tab>
@@ -197,30 +179,12 @@
             </div>
           </div>
 
-          <v-checkbox
-              v-model="advancedOptions"
-              label="Advanced options"
-            />
-
-          <HighlightedCard
-              v-if="advancedOptions"
-              tick-left="80px"
-              style="width: 350px;"
-          >
-            <template>
-            <v-text-field
-                v-model="checkIntervalSeconds"
-                type="number"
-                min="1"
-                :label="$t('runnerCheckInterval')"
-                :hint="$t('runnerCheckIntervalHint')"
-                :rules="[checkIntervalRule]"
-                persistent-hint
-                dense
-                outlined
-            />
-            </template>
-          </HighlightedCard>
+          <RunnerAdvancedOptions
+              :enabled="advancedOptions"
+              :check-interval="checkIntervalSeconds"
+              @update:enabled="advancedOptions = $event"
+              @update:check-interval="checkIntervalSeconds = $event"
+          />
 
           <h2 class="mt-11 mb-4">Variants of usage</h2>
 
@@ -651,13 +615,13 @@ import RunnerForm from '@/components/RunnerForm.vue';
 import axios from 'axios';
 import CopyClipboardButton from '@/components/CopyClipboardButton.vue';
 import PageMixin from '@/components/PageMixin';
-import HighlightedCard from '@/components/HighlightedCard.vue';
+import RunnerAdvancedOptions from '@/components/RunnerAdvancedOptions.vue';
 
 export default {
   mixins: [ItemListPageBase, PageMixin],
 
   components: {
-    HighlightedCard,
+    RunnerAdvancedOptions,
     CopyClipboardButton,
     RunnerForm,
     YesNoDialog,
@@ -700,24 +664,24 @@ export default {
     },
 
     runnerRegisterEnvCommand() {
-      const advancedOptions = this.advancedOptions
+      const checkIntervalSnippet = this.advancedOptions
         ? `SEMAPHORE_RUNNER_CHECK_INTERVAL_SECONDS=${this.checkInterval} \\\n`
         : '';
       return `SEMAPHORE_WEB_ROOT=${this.webHost} \\
 SEMAPHORE_RUNNER_REGISTRATION_TOKEN=${(this.newRunner || {}).registration_token} \\
-${advancedOptions}semaphore runner register --config ./config.runner.json
+${checkIntervalSnippet}semaphore runner register --config ./config.runner.json
 
-${advancedOptions}semaphore runner start --config ./config.runner.json`;
+${checkIntervalSnippet}semaphore runner start --config ./config.runner.json`;
     },
 
     runnerRegisterConfigContent() {
-      const advancedOptions = this.advancedOptions
+      const checkIntervalSnippet = this.advancedOptions
         ? `,\n  "runner": {
     "check_interval_seconds": ${this.checkInterval}
   }` : '';
 
       return `{
-  "web_host": "${this.webHost || window.location.origin}"${advancedOptions}
+  "web_host": "${this.webHost || window.location.origin}"${checkIntervalSnippet}
 }`;
     },
 
@@ -729,22 +693,22 @@ semaphore runner start --config ./config.runner.json`;
     },
 
     runnerRegisterDockerCommand() {
-      const advancedOptions = this.advancedOptions
+      const checkIntervalSnippet = this.advancedOptions
         ? `-e SEMAPHORE_RUNNER_CHECK_INTERVAL_SECONDS=${this.checkInterval} \\\n` : '';
       return `docker run \\
 -e SEMAPHORE_WEB_ROOT=${this.webHost} \\
 -e SEMAPHORE_RUNNER_REGISTRATION_TOKEN=${(this.newRunner || {}).registration_token} \\
-${advancedOptions}-d semaphoreui/runner:${this.version}`;
+${checkIntervalSnippet}-d semaphoreui/runner:${this.version}`;
     },
 
     runnerConfigCommand() {
-      const advancedOptions = this.advancedOptions
+      const checkIntervalSnippet = this.advancedOptions
         ? `,\n    "check_interval_seconds": ${this.checkInterval}` : '';
 
       return `{
   "web_host": "${this.webHost || window.location.origin}",
   "runner": {
-    "token": "${(this.newRunner || {}).token}"${advancedOptions}
+    "token": "${(this.newRunner || {}).token}"${checkIntervalSnippet}
   }
 }`;
     },
@@ -762,11 +726,11 @@ semaphore runner setup --config ./config.runner.json < /tmp/config.runner.stdin`
     },
 
     runnerEnvCommand() {
-      const advancedOptions = this.advancedOptions
+      const checkIntervalSnippet = this.advancedOptions
         ? `SEMAPHORE_RUNNER_CHECK_INTERVAL_SECONDS=${this.checkInterval} \\\n`
         : '';
       return `SEMAPHORE_WEB_ROOT=${this.webHost} \\
-${advancedOptions}SEMAPHORE_RUNNER_TOKEN=${(this.newRunner || {}).token} \\
+${checkIntervalSnippet}SEMAPHORE_RUNNER_TOKEN=${(this.newRunner || {}).token} \\
 semaphore runner start --no-config`;
     },
 
@@ -791,13 +755,13 @@ semaphore runner start --no-config`;
     },
 
     runnerDockerCommand() {
-      const advancedOptions = this.advancedOptions
+      const checkIntervalSnippet = this.advancedOptions
         ? `-e SEMAPHORE_RUNNER_CHECK_INTERVAL_SECONDS=${this.checkInterval} \\\n`
         : '';
       return `docker run \\
 -e SEMAPHORE_WEB_ROOT=${this.webHost} \\
 -e SEMAPHORE_RUNNER_TOKEN=${(this.newRunner || {}).token} \\
-${advancedOptions}-d semaphoreui/runner:${this.version}`;
+${checkIntervalSnippet}-d semaphoreui/runner:${this.version}`;
     },
   },
 
@@ -816,16 +780,11 @@ ${advancedOptions}-d semaphoreui/runner:${this.version}`;
       unregisteredFilter: false,
       resetRegistrationDialog: false,
       resetRegistrationRunner: null,
-      advancedOptions: null,
+      advancedOptions: false,
     };
   },
 
   methods: {
-    checkIntervalRule(v) {
-      const n = Number(v);
-      return (Number.isInteger(n) && n > 0) || this.$t('runnerCheckIntervalInvalid');
-    },
-
     async clearCache(runner) {
       const projectId = this.getProjectIdOfItem(runner.id);
 
