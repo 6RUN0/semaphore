@@ -263,6 +263,19 @@ type SurveyVar struct {
 	DefaultValue *SurveyVarDefaultValue `json:"default_value,omitempty" backup:"default_value"`
 }
 
+// DropSecretSurveyVarDefaults clears the default of every secret survey
+// variable in place and returns the slice. ValidateSurveyVar refuses such a
+// default on save, but rows and backup files written before that rule still
+// carry one, and the value would otherwise leave the database as plain text.
+func DropSecretSurveyVarDefaults(surveyVars []SurveyVar) []SurveyVar {
+	for i := range surveyVars {
+		if surveyVars[i].Type == SurveyVarSecret {
+			surveyVars[i].DefaultValue = nil
+		}
+	}
+	return surveyVars
+}
+
 type TemplateFilter struct {
 	ViewID          *int
 	BuildTemplateID *int
@@ -347,6 +360,14 @@ type Template struct {
 type TemplateWithPerms struct {
 	Template
 	Permissions *ProjectUserPermission `db:"permissions" json:"permissions"`
+}
+
+// DropSecretSurveyVarDefaults clears the default of every secret survey
+// variable of the template. Every route that serves a template to a client
+// has to call it; see DropSecretSurveyVarDefaults for why the row can hold
+// such a default at all.
+func (tpl *Template) DropSecretSurveyVarDefaults() {
+	tpl.SurveyVars = DropSecretSurveyVarDefaults(tpl.SurveyVars)
 }
 
 func (tpl *Template) FillParams(target any) error {

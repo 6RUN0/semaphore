@@ -204,10 +204,10 @@ func Test_MarshalValue_ExcludesPreservedFields(t *testing.T) {
 		{
 			name: "runner",
 			value: db.Runner{
-				ID: 7, Name: "r", Webhook: "https://example.com/hook",
+				ID: 7, Name: "r", Webhook: "https://example.com/hook", ProjectID: &projectID,
 				Touched: &now, CleaningRequested: &now, StartedAt: &now, PublicKey: &pub,
 			},
-			excluded: []string{"id", "webhook", "touched", "cleaning_requested", "started_at", "public_key"},
+			excluded: []string{"id", "project_id", "webhook", "touched", "cleaning_requested", "started_at", "public_key"},
 		},
 		{
 			name:     "role",

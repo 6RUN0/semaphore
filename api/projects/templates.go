@@ -50,6 +50,9 @@ func NewTemplateController(
 func GetTemplate(w http.ResponseWriter, r *http.Request) {
 	template := helpers.GetFromContext(r, "template").(db.Template)
 	permissions := helpers.GetFromContext(r, "permissions").(db.ProjectUserPermission)
+	// The row may predate the rule that refuses a default for a secret survey
+	// variable, and serving it would hand the client that secret.
+	template.DropSecretSurveyVarDefaults()
 	res := db.TemplateWithPerms{
 		Template:    template,
 		Permissions: &permissions,
@@ -82,6 +85,12 @@ func GetTemplates(w http.ResponseWriter, r *http.Request) {
 	if err != nil {
 		helpers.WriteError(w, err)
 		return
+	}
+
+	// Same as in GetTemplate: a row written before the rule that refuses a
+	// default for a secret survey variable still carries one.
+	for i := range templates {
+		templates[i].DropSecretSurveyVarDefaults()
 	}
 
 	helpers.WriteJSON(w, http.StatusOK, templates)

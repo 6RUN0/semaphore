@@ -3,11 +3,46 @@ package project
 import (
 	"encoding/json"
 	"fmt"
+	"net/url"
 	"reflect"
+	"strings"
 
 	"github.com/semaphoreui/semaphore/db"
 	"github.com/semaphoreui/semaphore/pkg/random"
 )
+
+// stripGitURLUserinfo removes credentials from a repository URL for export.
+// db.ValidateGitURL accepts a URL that carries them, and is deliberately not
+// tightened because the installations that already store one would stop
+// working; so the password of an https clone URL would otherwise travel in
+// the backup file as plain text.
+//
+// Only the scheme form has a userinfo field. The scp-like form
+// (git@host:path) has no place for a password and its user is part of the
+// address, so it is left alone, as is a local path. A password is dropped
+// under any scheme. A bare username survives only under ssh and git, where it
+// is the login identity; under http and https a bare userinfo is commonly the
+// access token itself.
+func stripGitURLUserinfo(gitURL string) string {
+	if !strings.Contains(gitURL, "://") {
+		return gitURL
+	}
+
+	u, err := url.Parse(gitURL)
+	if err != nil || u.User == nil {
+		return gitURL
+	}
+
+	if _, hasPassword := u.User.Password(); !hasPassword {
+		switch u.Scheme {
+		case "ssh", "git":
+			return gitURL
+		}
+	}
+
+	u.User = nil
+	return u.String()
+}
 
 func findNameBySlug[T db.BackupSluggedEntity](slug string, items []T) (*string, error) {
 	for _, o := range items {
@@ -62,19 +97,6 @@ func getScheduleByTemplate(templateID int, schedules []db.Schedule) *string {
 
 func getRandomName(name string) string {
 	return name + " - " + random.String(10)
-}
-
-// dropSecretSurveyVarDefaults clears the default of every secret survey
-// variable in place and returns the slice. Validation refuses such a default
-// on save, but rows and backup files written before that rule still carry
-// one, and the value would otherwise travel as plain text.
-func dropSecretSurveyVarDefaults(surveyVars []db.SurveyVar) []db.SurveyVar {
-	for i := range surveyVars {
-		if surveyVars[i].Type == db.SurveyVarSecret {
-			surveyVars[i].DefaultValue = nil
-		}
-	}
-	return surveyVars
 }
 
 func makeUniqueNames[T any](items []T, getter func(item *T) string, setter func(item *T, name string)) {
@@ -322,14 +344,23 @@ func (b *BackupDB) format() (*BackupFormat, error) {
 	for _, o := range b.schedules {
 
 		tplName, _ := findNameByID[db.Template](o.TemplateID, b.templates)
-		var repoName *string
-		if o.RepositoryID != nil {
-			repoName, _ = findNameByID[db.Repository](*o.RepositoryID, b.repositories)
-		}
 
-		// A schedule whose template is gone has nothing to restore into.
+		// A schedule whose template is gone has nothing to restore into, so
+		// it is dropped before its own references are resolved.
 		if tplName == nil {
 			continue
+		}
+
+		var repoName *string
+		if o.RepositoryID != nil {
+			// The column is nullable, so no repository is normal; an id that
+			// resolves to nothing is corrupt input. Exporting the schedule
+			// anyway would silently drop the commit check it schedules on.
+			var err error
+			repoName, err = findNameByID[db.Repository](*o.RepositoryID, b.repositories)
+			if err != nil {
+				return nil, fmt.Errorf("schedule %s: %w", o.Name, err)
+			}
 		}
 
 		schedule := BackupSchedule{
@@ -402,6 +433,7 @@ func (b *BackupDB) format() (*BackupFormat, error) {
 	repositories := make([]BackupRepository, len(b.repositories))
 	for i, o := range b.repositories {
 		SSHKey, _ := findNameByID[db.AccessKey](o.SSHKeyID, b.keys)
+		o.GitURL = stripGitURLUserinfo(o.GitURL)
 		repositories[i] = BackupRepository{
 			Repository: o,
 			SSHKey:     SSHKey,
@@ -455,7 +487,7 @@ func (b *BackupDB) format() (*BackupFormat, error) {
 			if err != nil {
 				return nil, err
 			}
-			o.SurveyVars = dropSecretSurveyVarDefaults(surveyVars)
+			o.SurveyVars = db.DropSecretSurveyVarDefaults(surveyVars)
 		}
 
 		var roles []BackupTemplateRole

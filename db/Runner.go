@@ -28,9 +28,12 @@ const (
 )
 
 type Runner struct {
-	ID        int    `db:"id" json:"id" backup:"-"`
-	Token     string `db:"token" json:"-" backup:"-"`
-	ProjectID *int   `db:"project_id" json:"project_id"`
+	ID    int    `db:"id" json:"id" backup:"-"`
+	Token string `db:"token" json:"-" backup:"-"`
+	// ProjectID is the identity of the project the backup came from. A restore
+	// assigns the new project itself (BackupRunner.Restore), so exporting it
+	// only leaks the source project id into the file.
+	ProjectID *int `db:"project_id" json:"project_id" backup:"-"`
 	// Webhook is a delivery URL that commonly carries a token; config sync
 	// treats it as a secret, and the JSON backup must not export it either.
 	Webhook           string     `db:"webhook" json:"webhook" backup:"-"`

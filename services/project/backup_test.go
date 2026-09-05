@@ -627,3 +627,117 @@ func TestMakeUniqueNames(t *testing.T) {
 
 	assert.True(t, isUnique(items), "Not unique names")
 }
+
+// TestBackupFormat_ScheduleRepository pins how format() treats the checkable
+// repository of a schedule. The column is nullable, so a nil one is normal;
+// an id that resolves to nothing is corrupt input and must be reported the
+// same way a template's unresolvable repository is, instead of silently
+// exporting a schedule that has lost its commit check. A schedule whose
+// template is gone is dropped before the repository is looked at all.
+func TestBackupFormat_ScheduleRepository(t *testing.T) {
+	repoID := 1
+	missingRepoID := 9
+
+	newDB := func(schedule db.Schedule) BackupDB {
+		return BackupDB{
+			meta:         db.Project{ID: 1, Name: "p"},
+			repositories: []db.Repository{{ID: repoID, Name: "repo"}},
+			templates:    []db.Template{{ID: 1, Name: "tpl", RepositoryID: repoID}},
+			schedules:    []db.Schedule{schedule},
+		}
+	}
+
+	tests := []struct {
+		name     string
+		schedule db.Schedule
+		wantErr  string
+		wantRepo *string
+		wantKept bool
+	}{
+		{
+			name:     "no repository",
+			schedule: db.Schedule{ID: 1, Name: "s", TemplateID: 1},
+			wantKept: true,
+		},
+		{
+			name:     "resolvable repository",
+			schedule: db.Schedule{ID: 1, Name: "s", TemplateID: 1, RepositoryID: &repoID},
+			wantKept: true,
+			wantRepo: &[]string{"repo"}[0],
+		},
+		{
+			name:     "missing repository",
+			schedule: db.Schedule{ID: 1, Name: "s", TemplateID: 1, RepositoryID: &missingRepoID},
+			wantErr:  "schedule s",
+		},
+		{
+			name:     "missing template outranks missing repository",
+			schedule: db.Schedule{ID: 1, Name: "s", TemplateID: 99, RepositoryID: &missingRepoID},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			b := newDB(tt.schedule)
+			res, err := b.format()
+
+			if tt.wantErr != "" {
+				require.ErrorContains(t, err, tt.wantErr)
+				return
+			}
+
+			require.NoError(t, err)
+			if !tt.wantKept {
+				assert.Empty(t, res.Schedules)
+				return
+			}
+
+			require.Len(t, res.Schedules, 1)
+			assert.Equal(t, tt.wantRepo, res.Schedules[0].CheckableRepository)
+		})
+	}
+}
+
+// TestStripGitURLUserinfo pins which repository URLs lose their userinfo on
+// export. ValidateGitURL accepts credentials in a URL and is deliberately not
+// tightened, so the stripping happens here instead.
+func TestStripGitURLUserinfo(t *testing.T) {
+	tests := []struct {
+		name     string
+		gitURL   string
+		expected string
+	}{
+		{"https with password", "https://user:token@example.com/org/repo.git", "https://example.com/org/repo.git"},
+		{"https with token as user", "https://ghp_secret@example.com/org/repo.git", "https://example.com/org/repo.git"},
+		{"http with port", "http://user:token@example.com:8080/org/repo.git", "http://example.com:8080/org/repo.git"},
+		{"https without userinfo", "https://example.com/org/repo.git", "https://example.com/org/repo.git"},
+		{"ssh login name", "ssh://git@example.com/org/repo.git", "ssh://git@example.com/org/repo.git"},
+		{"ssh with password", "ssh://git:secret@example.com/org/repo.git", "ssh://example.com/org/repo.git"},
+		{"scp like", "git@example.com:org/repo.git", "git@example.com:org/repo.git"},
+		{"local path", "/srv/git/repo.git", "/srv/git/repo.git"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			assert.Equal(t, tt.expected, stripGitURLUserinfo(tt.gitURL))
+		})
+	}
+}
+
+// TestBackupFormat_RepositoryURLDropsCredentials pins the export side: the
+// password of an https clone URL must not reach the backup file.
+func TestBackupFormat_RepositoryURLDropsCredentials(t *testing.T) {
+	b := BackupDB{
+		meta:         db.Project{ID: 1, Name: "p"},
+		repositories: []db.Repository{{ID: 1, Name: "repo", GitURL: "https://user:token@example.com/org/repo.git"}},
+	}
+
+	res, err := b.format()
+	require.NoError(t, err)
+	require.Len(t, res.Repositories, 1)
+	assert.Equal(t, "https://example.com/org/repo.git", res.Repositories[0].GitURL)
+
+	str, err := res.Marshal()
+	require.NoError(t, err)
+	assert.NotContains(t, str, "token")
+}
