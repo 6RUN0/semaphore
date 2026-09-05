@@ -12,6 +12,7 @@ import (
 
 	"github.com/semaphoreui/semaphore/api/helpers"
 	"github.com/semaphoreui/semaphore/db"
+	"github.com/semaphoreui/semaphore/pkg/common_errors"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -275,32 +276,48 @@ func TestInventorySnapshot_ReportsServiceFailures(t *testing.T) {
 	}
 }
 
-// A page size the store cannot make sense of must fall back to the default
-// rather than reach the query, where a negative offset or an overflowing limit
-// would be a syntax error on some dialects.
+// A page size the store cannot make sense of must not reach the query, where a
+// negative offset or an overflowing limit would be a syntax error on some
+// dialects. Only an absent or empty one is a default; the rest are rejected, so
+// that a typo is answered rather than silently replaced by a full page.
 func TestQueryInt(t *testing.T) {
 	for _, tt := range []struct {
-		name     string
-		query    string
-		expected int
+		name      string
+		query     string
+		expected  int
+		wantError bool
 	}{
-		{"absent", "", 0},
-		{"empty", "limit=", 0},
-		{"not a number", "limit=abc", 0},
-		{"negative", "limit=-5", 0},
-		{"zero", "limit=0", 0},
-		{"positive", "limit=42", 42},
-		{"wider than int64", "limit=99999999999999999999", 0},
-		{"float", "limit=1.5", 0},
+		{name: "absent", query: "", expected: 0},
+		{name: "empty", query: "limit=", expected: 0},
+		{name: "zero", query: "limit=0", expected: 0},
+		{name: "positive", query: "limit=42", expected: 42},
+		{name: "not a number", query: "limit=abc", wantError: true},
+		{name: "negative", query: "limit=-5", wantError: true},
+		{name: "wider than int64", query: "limit=99999999999999999999", wantError: true},
+		{name: "float", query: "limit=1.5", wantError: true},
 		// "+" is a space once the query string is decoded, so a client that
-		// signs its number gets the default rather than the number.
-		{"signed", "limit=%2B7", 7},
-		{"plus is a space", "limit=+7", 0},
+		// signs its number is signing it wrong and is told so.
+		{name: "signed", query: "limit=%2B7", expected: 7},
+		{name: "plus is a space", query: "limit=+7", wantError: true},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
 			req := httptest.NewRequest(http.MethodGet, "/hosts?"+tt.query, nil)
 
-			assert.Equal(t, tt.expected, queryInt(req, "limit"))
+			value, err := queryInt(req, "limit")
+
+			if tt.wantError {
+				require.Error(t, err)
+
+				var validationError *common_errors.ValidationError
+				assert.ErrorAs(t, err, &validationError, "the caller has to see 400, not 500")
+				assert.Contains(t, err.Error(), "limit")
+				assert.Equal(t, 0, value)
+
+				return
+			}
+
+			require.NoError(t, err)
+			assert.Equal(t, tt.expected, value)
 		})
 	}
 }
@@ -359,4 +376,79 @@ func TestGetInventorySnapshotHosts_KeepsFiltersThatFit(t *testing.T) {
 
 	require.Equal(t, http.StatusOK, w.Code)
 	assert.Equal(t, name, svc.gotFilter.Search)
+}
+
+// A page the caller typed wrong is not a page the caller left out. Answering
+// the default for both hid the typo behind a full first page, so a client
+// asking for limit=abc got 500 hosts and no way to tell it had asked wrong.
+func TestInventorySnapshot_RejectsAMalformedPage(t *testing.T) {
+	endpoints := []struct {
+		name string
+		call func(*InventorySnapshotController, http.ResponseWriter, *http.Request)
+	}{
+		{"hosts", (*InventorySnapshotController).GetInventorySnapshotHosts},
+		{"groups", (*InventorySnapshotController).GetInventorySnapshotGroups},
+	}
+
+	for _, param := range []struct {
+		name  string
+		query string
+	}{
+		{"limit is not a number", "limit=abc"},
+		{"limit is negative", "limit=-1"},
+		{"limit is a float", "limit=1.5"},
+		{"limit is wider than int64", "limit=99999999999999999999"},
+		{"offset is not a number", "offset=abc"},
+		{"offset is negative", "offset=-1"},
+	} {
+		for _, endpoint := range endpoints {
+			t.Run(endpoint.name+"/"+param.name, func(t *testing.T) {
+				svc := &mockInventorySnapshotService{}
+				ctrl := NewInventorySnapshotController(svc)
+
+				req, w := newSnapshotRequest(http.MethodGet, "/snapshot?"+param.query, contextInventory())
+				endpoint.call(ctrl, w, req)
+
+				require.Equal(t, http.StatusBadRequest, w.Code)
+
+				var body struct {
+					Error string `json:"error"`
+				}
+				require.NoError(t, json.Unmarshal(w.Body.Bytes(), &body))
+
+				name := strings.SplitN(param.query, "=", 2)[0]
+				assert.Contains(t, body.Error, name, "the body must name the parameter that was rejected")
+
+				assert.Equal(t, 0, svc.gotProjectID, "a rejected request must not reach the store")
+			})
+		}
+	}
+}
+
+// An absent or empty parameter still means "no preference": an untouched form
+// field is sent as an empty value, and rejecting that would fail a request
+// nobody got wrong.
+func TestInventorySnapshot_AcceptsAnUnsetPage(t *testing.T) {
+	for _, tt := range []struct {
+		name     string
+		query    string
+		expected db.InventoryHostFilter
+	}{
+		{"absent", "", db.InventoryHostFilter{}},
+		{"empty limit", "?limit=", db.InventoryHostFilter{}},
+		{"empty offset", "?offset=", db.InventoryHostFilter{}},
+		{"zero", "?limit=0&offset=0", db.InventoryHostFilter{}},
+		{"given", "?limit=50&offset=100", db.InventoryHostFilter{Limit: 50, Offset: 100}},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			svc := &mockInventorySnapshotService{}
+			ctrl := NewInventorySnapshotController(svc)
+
+			req, w := newSnapshotRequest(http.MethodGet, "/snapshot/hosts"+tt.query, contextInventory())
+			ctrl.GetInventorySnapshotHosts(w, req)
+
+			require.Equal(t, http.StatusOK, w.Code)
+			assert.Equal(t, tt.expected, svc.gotFilter)
+		})
+	}
 }

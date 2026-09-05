@@ -2,11 +2,13 @@ package projects
 
 import (
 	"errors"
+	"fmt"
 	"net/http"
 	"strconv"
 
 	"github.com/semaphoreui/semaphore/api/helpers"
 	"github.com/semaphoreui/semaphore/db"
+	"github.com/semaphoreui/semaphore/pkg/common_errors"
 	"github.com/semaphoreui/semaphore/services/server"
 	log "github.com/sirupsen/logrus"
 )
@@ -42,11 +44,23 @@ func (c *InventorySnapshotController) GetInventorySnapshot(w http.ResponseWriter
 func (c *InventorySnapshotController) GetInventorySnapshotHosts(w http.ResponseWriter, r *http.Request) {
 	inventory := helpers.GetFromContext(r, "inventory").(db.Inventory)
 
+	limit, err := queryInt(r, "limit")
+	if err != nil {
+		helpers.WriteError(w, err)
+		return
+	}
+
+	offset, err := queryInt(r, "offset")
+	if err != nil {
+		helpers.WriteError(w, err)
+		return
+	}
+
 	filter := db.InventoryHostFilter{
 		Group:  queryName(r, "group"),
 		Search: queryName(r, "search"),
-		Limit:  queryInt(r, "limit"),
-		Offset: queryInt(r, "offset"),
+		Limit:  limit,
+		Offset: offset,
 	}
 
 	hosts, err := c.snapshotService.GetHosts(inventory.ProjectID, inventory.ID, queryTemplateID(r), filter)
@@ -67,9 +81,21 @@ func (c *InventorySnapshotController) GetInventorySnapshotHosts(w http.ResponseW
 func (c *InventorySnapshotController) GetInventorySnapshotGroups(w http.ResponseWriter, r *http.Request) {
 	inventory := helpers.GetFromContext(r, "inventory").(db.Inventory)
 
+	limit, err := queryInt(r, "limit")
+	if err != nil {
+		helpers.WriteError(w, err)
+		return
+	}
+
+	offset, err := queryInt(r, "offset")
+	if err != nil {
+		helpers.WriteError(w, err)
+		return
+	}
+
 	filter := db.InventoryGroupFilter{
-		Limit:  queryInt(r, "limit"),
-		Offset: queryInt(r, "offset"),
+		Limit:  limit,
+		Offset: offset,
 	}
 
 	groups, err := c.snapshotService.GetGroups(inventory.ProjectID, inventory.ID, queryTemplateID(r), filter)
@@ -275,16 +301,26 @@ func currentUsername(r *http.Request) string {
 	return user.Username
 }
 
-// queryInt reads a non-negative integer query parameter, treating an absent or
-// malformed one as unset. The store clamps the resulting page size, so a
-// nonsense limit cannot widen the response.
-func queryInt(r *http.Request, name string) int {
-	value, err := strconv.Atoi(r.URL.Query().Get(name))
-	if err != nil || value < 0 {
-		return 0
+// queryInt reads a non-negative integer query parameter. An absent or empty one
+// is unset and reads as 0, which is what an untouched form field sends.
+//
+// Anything else has to parse. Reading a malformed one as unset made "limit=abc"
+// indistinguishable from no limit at all: the caller got the default page and no
+// signal that its number had been dropped.
+func queryInt(r *http.Request, name string) (int, error) {
+	raw := r.URL.Query().Get(name)
+	if raw == "" {
+		return 0, nil
 	}
 
-	return value
+	value, err := strconv.Atoi(raw)
+	if err != nil || value < 0 {
+		return 0, common_errors.NewValidationError(
+			fmt.Sprintf("Query parameter %q must be a non-negative integer.", name),
+		)
+	}
+
+	return value, nil
 }
 
 // queryTemplateID reads the optional template a host list is being asked for.
@@ -292,8 +328,11 @@ func queryInt(r *http.Request, name string) int {
 // service resolves the template within the inventory's project, so an id from
 // another project resolves to nothing rather than to that project's repository.
 func queryTemplateID(r *http.Request) *int {
-	value := queryInt(r, "template_id")
-	if value <= 0 {
+	// Unlike a page size, this one is read leniently: it is a hint that most
+	// inventories never need, every read endpoint accepts its absence, and a
+	// value that names no template of the project resolves to nothing anyway.
+	value, err := queryInt(r, "template_id")
+	if err != nil || value <= 0 {
 		return nil
 	}
 
