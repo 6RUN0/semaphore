@@ -1,6 +1,7 @@
 package tasks
 
 import (
+	"errors"
 	"strconv"
 	"strings"
 
@@ -145,13 +146,34 @@ func (p *TaskPool) recoverInterruptedTasks() {
 // the task this row described no longer exists as a process, so there is
 // nothing to signal — only the record to correct.
 //
-// A task that already reached a final status is left alone. This path is also
-// reached from TaskPool.StopTask when a task is not in the pool and its
-// details can no longer be loaded (a broken template or repository), and the
-// caller there passes whatever row it already had in hand — which, for a task
-// that finished on its own between that load and this call, would otherwise
-// turn a successful run into a false "stopped".
+// A task that already reached a final status is left alone. Every caller
+// hands in a snapshot of the row taken earlier - the pool's in-memory copy
+// during recovery, the middleware's read behind TaskPool.StopTask - and the
+// task may have settled since, by itself or on another node in HA. So the
+// decision is made on the row as the database has it now; taken on the
+// caller's copy, a successful run would be rewritten into a false "stopped"
+// with its End moved to the time of the stop request.
+//
+// This narrows the window rather than closing it: UpdateTask writes by id
+// alone, so a task that finishes between the read below and that write is
+// still overwritten. Closing it needs a conditional update in the storage
+// layer (update ... where status in (unfinished)).
 func (p *TaskPool) stopInterruptedTask(task db.Task, reason string) {
+	taskID := task.ID
+
+	task, err := p.store.GetTaskByID(taskID)
+	if err != nil {
+		// A deleted row has nothing left to correct, so only a real failure
+		// is worth reporting.
+		if !errors.Is(err, db.ErrNotFound) {
+			log.WithError(err).WithFields(log.Fields{
+				"task_id": taskID,
+				"context": "task_recovery",
+			}).Error("failed to re-read a task before stopping it")
+		}
+		return
+	}
+
 	if task.Status.IsFinished() {
 		return
 	}

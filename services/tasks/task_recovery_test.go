@@ -8,6 +8,7 @@ import (
 	"github.com/semaphoreui/semaphore/db"
 	"github.com/semaphoreui/semaphore/db/sql"
 	"github.com/semaphoreui/semaphore/pkg/task_logger"
+	"github.com/semaphoreui/semaphore/pkg/tz"
 	"github.com/semaphoreui/semaphore/util"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -428,4 +429,35 @@ func TestRecoverySettlesAPendingResolve(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, db.InventorySnapshotStatusError, snapshot.Status)
 	assert.NotEmpty(t, snapshot.Error)
+}
+
+// The caller hands stopInterruptedTask the row it read earlier: the pool's
+// in-memory copy for DeleteTask, the middleware's copy for StopTask. The task
+// can finish in between -- by itself, or on another node in HA -- so the
+// decision has to be made on the row as it is now. Made on the caller's
+// snapshot, a successful run is rewritten into a false "stopped" and its End
+// is moved to the time of the stop request.
+func TestStopInterruptedTaskRereadsTheRow(t *testing.T) {
+	pool, store := newRecoveryPool(t)
+	_, _, task := newResolveTask(t, store)
+
+	finishedAt := tz.Now().Add(-time.Minute)
+	task.Status = task_logger.TaskSuccessStatus
+	task.End = &finishedAt
+	require.NoError(t, store.UpdateTask(task))
+
+	stale := task
+	stale.Status = task_logger.TaskRunningStatus
+	stale.End = nil
+
+	const reason = "Task was stopped manually; its details could no longer be loaded."
+	pool.stopInterruptedTask(stale, reason)
+
+	row, err := store.GetTaskByID(task.ID)
+	require.NoError(t, err)
+	assert.Equal(t, task_logger.TaskSuccessStatus, row.Status, "a finished run must not become a false stop")
+	require.NotNil(t, row.End)
+	assert.WithinDuration(t, finishedAt, *row.End, 2*time.Second, "the original End must survive")
+	assert.False(t, taskLogContains(t, store, task, reason),
+		"a task nobody stopped must not get a stop line in its log")
 }
