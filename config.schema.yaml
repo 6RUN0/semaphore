@@ -41,7 +41,12 @@ properties:
   tmp_path:
     type: string
     default: /tmp/semaphore
-    description: Working directory for ephemeral project data.
+    description: >-
+      Working directory for ephemeral project data, repository checkouts among
+      them. Must be local to the node. The locks that keep two checkouts of one
+      repository out of the same directory live inside a single process, so two
+      HA nodes pointed at one shared volume pull into the same working tree with
+      nothing between them.
   home_dir_mode:
     type: string
     enum: ["", user_home, project_home, template_dir]

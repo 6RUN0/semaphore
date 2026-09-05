@@ -528,7 +528,11 @@ type ConfigType struct {
 	// defaults to empty
 	Interface string `json:"interface,omitempty" env:"SEMAPHORE_INTERFACE"`
 
-	// semaphore stores ephemeral projects here
+	// TmpPath is where semaphore stores ephemeral projects, repository
+	// checkouts among them. It must be local to the node: the locks that keep
+	// two checkouts of one repository out of the same directory live inside a
+	// single process, so two HA nodes sharing this volume pull into the same
+	// working tree with nothing between them.
 	TmpPath string `json:"tmp_path,omitempty" default:"/tmp/semaphore" env:"SEMAPHORE_TMP_PATH"`
 
 	// SecretsPath is a legacy top-level setting for backwards compatibility.
