@@ -1,6 +1,7 @@
 package projects
 
 import (
+	"errors"
 	"io"
 	"net/http"
 	"strings"
@@ -12,6 +13,20 @@ import (
 	projectService "github.com/semaphoreui/semaphore/services/project"
 	log "github.com/sirupsen/logrus"
 )
+
+// MaxProjectRestoreBodySize bounds one uploaded backup file. Restore reads the
+// whole body into memory before it looks at it, and NonAdminCanCreateProject
+// opens the route to every user, so without the cap one endless body exhausts
+// the server.
+//
+// Unlike the runner report limit the number cannot be derived: a backup holds
+// every row of one project (templates with their survey vars, environments
+// with their JSON documents, inventories, keys, integrations, workflows) and
+// none of those columns has a length of its own to add up. It is an allowance
+// instead, of the same order as the fixed part of MaxRunnerReportBodySize: a
+// template serializes to a few kilobytes, so 32 MiB covers a project with
+// thousands of them, far past any real one.
+const MaxProjectRestoreBodySize = int64(32 * 1024 * 1024)
 
 // BackupController serves project backup/restore. Workflows live outside
 // db.Store (Pro feature, see db.WorkflowManager), so the workflow store is
@@ -62,8 +77,18 @@ func (c *BackupController) Restore(w http.ResponseWriter, r *http.Request) {
 
 	var backup projectService.BackupFormat
 
+	// Capped after the permission check so an unauthorized caller is turned
+	// away before the body is read at all.
+	r.Body = http.MaxBytesReader(w, r.Body, MaxProjectRestoreBodySize)
+
 	buf := new(strings.Builder)
 	if _, err := io.Copy(buf, r.Body); err != nil {
+		var tooLarge *http.MaxBytesError
+		if errors.As(err, &tooLarge) {
+			log.Warn(user.Username + " sent a backup over the size limit")
+			w.WriteHeader(http.StatusRequestEntityTooLarge)
+			return
+		}
 		log.Error(err)
 		helpers.WriteError(w, err)
 		return
