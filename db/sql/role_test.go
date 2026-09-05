@@ -66,7 +66,17 @@ func assertProjectScopedRoleMutations(t *testing.T, store *SqlDb) {
 	t.Run("update to identical values succeeds", func(t *testing.T) {
 		// On MySQL an unchanged row reports zero affected rows; existence
 		// must not be derived from that.
-		require.NoError(t, store.UpdateProjectRole(projA.ID, role))
+		// Read the row instead of reusing the outer role, whose fields the
+		// sibling subtests mutate: writing anything but the stored values
+		// makes this a value change under some -run selections.
+		stored, err := store.GetProjectRole(projA.ID, customSlug)
+		require.NoError(t, err)
+
+		require.NoError(t, store.UpdateProjectRole(projA.ID, stored))
+
+		got, err := store.GetProjectRole(projA.ID, customSlug)
+		require.NoError(t, err)
+		assert.Equal(t, stored, got)
 	})
 
 	t.Run("delete through another project is refused", func(t *testing.T) {

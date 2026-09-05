@@ -5,6 +5,7 @@ import (
 
 	"github.com/semaphoreui/semaphore/db"
 	"github.com/semaphoreui/semaphore/pkg/task_logger"
+	"github.com/semaphoreui/semaphore/pkg/tz"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -68,8 +69,11 @@ func newTaskFilterFixture(t *testing.T, store *SqlDb) taskFilterFixture {
 			ProjectID:     projectID,
 			TemplateID:    templateID,
 			WorkflowRunID: runID,
+			Created:       tz.Now(),
 		}, 0)
 		require.NoError(t, err)
+		require.False(t, task.Created.IsZero(),
+			"a zero Created is written as '0000-00-00' and strict MySQL rejects it")
 
 		task.Status = status
 		require.NoError(t, store.UpdateTask(task))
