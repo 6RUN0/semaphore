@@ -13,6 +13,7 @@ permissions:
 jobs:
   prerelease:
     runs-on: ubuntu-latest
+    if: github.repository_owner == 'semaphoreui'
 
     steps:
       - name: Checkout source
