@@ -589,8 +589,13 @@ type ConfigType struct {
 	GitClientId string `json:"git_client,omitempty" rule:"^go_git|cmd_git$" env:"SEMAPHORE_GIT_CLIENT" default:"cmd_git"`
 
 	// GitSubmoduleJobs is how many submodules the command-line Git client
-	// fetches in parallel during clone and update operations.
-	GitSubmoduleJobs int `json:"git_submodule_jobs,omitempty" rule:"^[1-9][0-9]*$" env:"SEMAPHORE_GIT_SUBMODULE_JOBS" default:"4"`
+	// fetches in parallel during clone and update operations, capped at
+	// maxGitSubmoduleJobs.
+	//
+	// The rule spells the range out because it is a regex over the formatted
+	// value and cannot reference the constant; TestValidateConfig pins the two
+	// to each other.
+	GitSubmoduleJobs int `json:"git_submodule_jobs,omitempty" rule:"^([1-9]|[12][0-9]|3[0-2])$" env:"SEMAPHORE_GIT_SUBMODULE_JOBS" default:"4"`
 
 	// GitAttempts is how many times a git clone or pull is tried before the task
 	// fails, for git servers which are intermittently unavailable. 1 tries once
@@ -756,6 +761,14 @@ const defaultRunnerCheckIntervalSec = 1
 // value exceeds int on 32-bit release targets (386, arm).
 const maxRunnerCheckIntervalSec int64 = int64(math.MaxInt64) / int64(time.Second)
 
+// Ceiling for GitSubmoduleJobs. git limits submodule.fetchJobs by nothing but
+// the administrator's judgement, while the count multiplies the outgoing
+// connections a recursive clone of a foreign repository opens from the API
+// process, and the git subprocesses each checkout spawns on every HA node.
+// 32 covers any real repository and stops a mistyped value from turning one
+// checkout into hundreds of processes.
+const maxGitSubmoduleJobs = 32
+
 // GetSecretsPath returns the secrets path from configuration.
 // Used for backward compatibility with legacy top-level secrets_path.
 func (conf *ConfigType) GetSecretsPath() string {
@@ -826,12 +839,15 @@ func (conf *ConfigType) RunnersTaskFailTimeout() time.Duration {
 
 // RunnerCheckInterval returns how often this runner polls the server for new
 // jobs. Out-of-range values fall back to the default: 0 is indistinguishable
-// from "unset" after defaults are applied, and oversized values overflow.
+// from "unset" after defaults are applied, and oversized values overflow. The
+// runner section itself is optional, so a config without one falls back too.
 func (conf *ConfigType) RunnerCheckInterval() time.Duration {
 	sec := int64(defaultRunnerCheckIntervalSec)
-	if configured := int64(conf.Runner.CheckIntervalSeconds); configured > 0 &&
-		configured <= maxRunnerCheckIntervalSec {
-		sec = configured
+	if conf.Runner != nil {
+		if configured := int64(conf.Runner.CheckIntervalSeconds); configured > 0 &&
+			configured <= maxRunnerCheckIntervalSec {
+			sec = configured
+		}
 	}
 	return time.Duration(sec) * time.Second
 }

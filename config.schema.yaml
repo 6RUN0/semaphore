@@ -105,8 +105,12 @@ properties:
   git_submodule_jobs:
     type: integer
     minimum: 1
+    maximum: 32
     default: 4
-    description: Number of submodules fetched in parallel by the command-line Git client.
+    description: >
+      Number of submodules fetched in parallel by the command-line Git client.
+      Multiplies the outgoing connections a single recursive clone opens to the
+      remote repository, and the git processes it spawns on every node.
   git_attempts:
     type: integer
     minimum: 1
@@ -695,9 +699,11 @@ $defs:
         minimum: 1
         default: 1
         description: >
-          How often the runner polls the server for new jobs and reports progress.
-          Raising it reduces request volume on a server with many runners, at the
-          cost of jobs starting slightly later.
+          How often the runner polls the server for new jobs. Raising it reduces
+          request volume on a server with many runners, at the cost of jobs
+          starting slightly later. It does not affect the progress report, which
+          stays at one second because the server also treats it as the runner's
+          liveness heartbeat.
       connection: { $ref: "#/$defs/RunnerConnectionConfig" }
       executor:   { $ref: "#/$defs/ExecutorConfig" }
 

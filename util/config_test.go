@@ -589,6 +589,18 @@ func TestValidateConfig(t *testing.T) {
 
 	Config.GitSubmoduleJobs = 0
 	ensureConfigValidationFailure(t, "GitSubmoduleJobs", Config.GitSubmoduleJobs)
+
+	// The ceiling is what keeps one checkout from opening an unbounded number
+	// of outgoing connections and git processes on every HA node.
+	Config.GitSubmoduleJobs = maxGitSubmoduleJobs
+	validateConfig()
+
+	Config.GitSubmoduleJobs = maxGitSubmoduleJobs + 1
+	ensureConfigValidationFailure(t, "GitSubmoduleJobs", Config.GitSubmoduleJobs)
+
+	Config.GitSubmoduleJobs = 100
+	ensureConfigValidationFailure(t, "GitSubmoduleJobs", Config.GitSubmoduleJobs)
+
 	Config.GitSubmoduleJobs = 4
 
 	// Config.CookieHash = "\"0Sn+edH3doJ4EO4Rl49Y0KrxjUkXuVtR5zKHGGWerxQ=\"" // invalid with quotes (can happen when supplied as env-var)
