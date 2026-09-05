@@ -199,15 +199,48 @@ func (c CmdGitClient) Clone(r GitRepository) error {
 	}
 
 	return c.run(r, GitRepositoryTmpPath,
-		"clone",
-		"--recursive",
-		"--jobs",
-		strconv.Itoa(util.Config.GitSubmoduleJobs),
-		"--branch",
-		r.Repository.GitBranch,
-		"--end-of-options",
-		r.Repository.GetGitURL(false),
-		dirName)
+		gitCloneArgs(
+			r.Repository.GitBranch,
+			r.Repository.GetGitURL(false),
+			dirName,
+			util.Config.GitSubmoduleJobs,
+		)...)
+}
+
+// gitSubmoduleJobsArgs builds the --jobs argument of a submodule-aware git
+// command, and nothing at all when the count is below one.
+//
+// git refuses to run with `--jobs 0`: it aborts with "you must provide a
+// non-zero number of processes" (exit code 134 on git 2.54), and a negative
+// count ends the command as well. Config validation keeps the configured value
+// within 1..maxGitSubmoduleJobs, but util.Config is a plain struct that any
+// code path can fill in without ConfigInit, so the zero value does reach here.
+// Without the option git falls back to submodule.fetchJobs, or to one job.
+//
+// A count above the ceiling is passed on unchanged: clamping it here would
+// silently disagree with the value the administrator set, and the ceiling is
+// enforced where the config is validated.
+func gitSubmoduleJobsArgs(jobs int) []string {
+	if jobs < 1 {
+		return nil
+	}
+
+	return []string{"--jobs", strconv.Itoa(jobs)}
+}
+
+// gitCloneArgs builds a recursive clone. --end-of-options separates the
+// options from the URL, so that a repository address beginning with a dash is
+// not read as one.
+func gitCloneArgs(branch, url, dirName string, submoduleJobs int) []string {
+	args := []string{"clone", "--recursive"}
+	args = append(args, gitSubmoduleJobsArgs(submoduleJobs)...)
+	return append(args, "--branch", branch, "--end-of-options", url, dirName)
+}
+
+// gitSubmoduleUpdateArgs builds the submodule checkout that follows a pull.
+func gitSubmoduleUpdateArgs(submoduleJobs int) []string {
+	args := []string{"submodule", "update", "--init", "--recursive"}
+	return append(args, gitSubmoduleJobsArgs(submoduleJobs)...)
 }
 
 func (c CmdGitClient) Pull(r GitRepository) error {
@@ -217,13 +250,7 @@ func (c CmdGitClient) Pull(r GitRepository) error {
 	if err != nil {
 		return err
 	}
-	return c.run(r, GitRepositoryFullPath,
-		"submodule",
-		"update",
-		"--init",
-		"--recursive",
-		"--jobs",
-		strconv.Itoa(util.Config.GitSubmoduleJobs))
+	return c.run(r, GitRepositoryFullPath, gitSubmoduleUpdateArgs(util.Config.GitSubmoduleJobs)...)
 }
 
 func (c CmdGitClient) Checkout(r GitRepository, target string) error {

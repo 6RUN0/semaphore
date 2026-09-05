@@ -4,6 +4,7 @@ package db_lib
 
 import (
 	"os/exec"
+	"strings"
 	"testing"
 	"time"
 
@@ -51,4 +52,66 @@ func TestRunBoundedDoesNotWaitForGrandchildHoldingThePipe(t *testing.T) {
 	assert.Contains(t, err.Error(), "timed out")
 	assert.Less(t, time.Since(started), 5*time.Second,
 		"a surviving grandchild must not keep the call waiting")
+}
+
+// git rejects `--jobs 0` outright: it aborts with "you must provide a non-zero
+// number of processes" (git 2.54, exit code 134), and a negative count ends the
+// command as well. util.Config is a plain struct that any code path can fill in
+// without ConfigInit, so the zero value reaches the client and must not be
+// passed on.
+func TestGitCloneArgsOmitJobsWhenCountIsBelowOne(t *testing.T) {
+	tests := []struct {
+		name         string
+		jobs         int
+		expectedJobs []string
+	}{
+		{"zero jobs", 0, nil},
+		{"negative jobs", -1, nil},
+		{"configured jobs", 4, []string{"--jobs", "4"}},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			args := gitCloneArgs("main", "https://example.com/repo.git", "repo", tt.jobs)
+
+			expected := []string{"clone", "--recursive"}
+			expected = append(expected, tt.expectedJobs...)
+			expected = append(expected,
+				"--branch", "main",
+				"--end-of-options", "https://example.com/repo.git", "repo")
+
+			assert.Equal(t, expected, args)
+		})
+	}
+}
+
+func TestGitSubmoduleUpdateArgsOmitJobsWhenCountIsBelowOne(t *testing.T) {
+	tests := []struct {
+		name         string
+		jobs         int
+		expectedJobs []string
+	}{
+		{"zero jobs", 0, nil},
+		{"negative jobs", -1, nil},
+		{"configured jobs", 4, []string{"--jobs", "4"}},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			args := gitSubmoduleUpdateArgs(tt.jobs)
+
+			expected := []string{"submodule", "update", "--init", "--recursive"}
+			expected = append(expected, tt.expectedJobs...)
+
+			assert.Equal(t, expected, args)
+		})
+	}
+}
+
+// The ceiling on the job count belongs to config validation, not to the client:
+// clamping here would silently disagree with the value the administrator set.
+func TestGitCloneArgsDoNotClampLargeJobCounts(t *testing.T) {
+	args := gitCloneArgs("main", "https://example.com/repo.git", "repo", 1000)
+
+	assert.Contains(t, strings.Join(args, " "), "--jobs 1000")
 }
