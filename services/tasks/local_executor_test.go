@@ -2,14 +2,19 @@ package tasks
 
 import (
 	"encoding/json"
+	"io"
+	"os"
 	"path/filepath"
 	"strings"
 	"testing"
 
 	"github.com/semaphoreui/semaphore/db"
+	"github.com/semaphoreui/semaphore/db_lib"
 	"github.com/semaphoreui/semaphore/pkg/ssh"
 	"github.com/semaphoreui/semaphore/pkg/task_logger"
 	"github.com/semaphoreui/semaphore/util"
+	"github.com/sirupsen/logrus"
+	logtest "github.com/sirupsen/logrus/hooks/test"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -987,4 +992,376 @@ func TestGetArgs_AnsibleForks(t *testing.T) {
 
 func strPtr(s string) *string {
 	return &s
+}
+
+// recordingApp captures what the preparation hands to the dependency
+// installation. The embedded nil interface panics on any other method, which
+// keeps the double from silently covering more than it should.
+type recordingApp struct {
+	db_lib.LocalApp
+	installingArgs db_lib.LocalAppInstallingArgs
+	installed      bool
+}
+
+func (a *recordingApp) InstallRequirements(args db_lib.LocalAppInstallingArgs) error {
+	a.installingArgs = args
+	a.installed = true
+	return nil
+}
+
+// recordingTerraformInstaller is the same double for the terraform preparation,
+// which installs through its own entry point so it can pass init arguments.
+type recordingTerraformInstaller struct {
+	installingArgs db_lib.LocalAppInstallingArgs
+	initArgs       []string
+	installed      bool
+}
+
+func (a *recordingTerraformInstaller) InstallRequirementsWithInitArgs(
+	args db_lib.LocalAppInstallingArgs,
+	initArgs []string,
+) error {
+	a.installingArgs = args
+	a.initArgs = initArgs
+	a.installed = true
+	return nil
+}
+
+// agentKeyInstaller installs every key as a running ssh agent, which is the
+// state in which the socket can leak into stages that must not have it.
+type agentKeyInstaller struct {
+	socketFile string
+}
+
+func (i *agentKeyInstaller) Install(
+	key db.AccessKey,
+	usage db.AccessKeyRole,
+	logger task_logger.Logger,
+) (ssh.AccessKeyInstallation, error) {
+	return ssh.AccessKeyInstallation{SSHAgent: &ssh.Agent{SocketFile: i.socketFile}}, nil
+}
+
+// executorWithInstalledAgent builds an executor whose preparation runs end to
+// end without a network or a git binary: a local repository, a static
+// inventory, and an ssh key that installs an agent.
+func executorWithInstalledAgent(t *testing.T, app db_lib.LocalApp) *LocalExecutor {
+	t.Helper()
+
+	setupExecutorConfig(t)
+	tmp := t.TempDir()
+	util.Config.TmpPath = tmp
+	util.Config.HomeDirMode = util.HomeDirModeProjectHome
+
+	repoDir := filepath.Join(tmp, "repository")
+	require.NoError(t, os.MkdirAll(repoDir, 0o755))
+
+	return &LocalExecutor{
+		Task:       db.Task{ID: 42},
+		Template:   db.Template{ID: 1, ProjectID: 1, Playbook: "test.yml"},
+		Repository: db.Repository{ProjectID: 1, GitURL: repoDir},
+		Inventory: db.Inventory{
+			ID:        3,
+			Type:      db.InventoryStatic,
+			Inventory: "localhost",
+			SSHKeyID:  intPtr(9),
+			SSHKey:    db.AccessKey{ID: 9, Type: db.AccessKeySSH},
+		},
+		KeyInstaller: &agentKeyInstaller{socketFile: filepath.Join(tmp, "agent.sock")},
+		App:          app,
+		Logger:       &recordingLogger{},
+	}
+}
+
+// assertNoAgentSocket fails when the installation stage was handed the socket of
+// the agent that holds the inventory key.
+func assertNoAgentSocket(t *testing.T, env []string) {
+	t.Helper()
+
+	for _, v := range env {
+		assert.False(t, strings.HasPrefix(v, "SSH_AUTH_SOCK="),
+			"the dependency installation must not receive the agent socket, got %q", v)
+	}
+}
+
+// Dependency installation executes content of the template repository:
+// ansible-galaxy runs the roles listed in requirements.yml and terraform init
+// fetches and runs providers. Handing it the agent socket would turn that
+// content into a signing oracle for the key Semaphore uses to reach the managed
+// hosts.
+func TestPrepareRunKeepsAgentSocketOutOfInstallStage(t *testing.T) {
+	app := &recordingApp{}
+	exec := executorWithInstalledAgent(t, app)
+
+	require.NoError(t, exec.prepareRun(db_lib.LocalAppInstallingArgs{
+		EnvironmentVars: []string{"ANSIBLE_FORCE_COLOR=True"},
+	}))
+
+	require.True(t, app.installed, "the installation stage must have run")
+	require.NotEmpty(t, exec.getSSHAgentEnv(),
+		"the agent must be installed, otherwise the test proves nothing")
+	assertNoAgentSocket(t, app.installingArgs.EnvironmentVars)
+}
+
+func TestPrepareRunTerraformKeepsAgentSocketOutOfInstallStage(t *testing.T) {
+	installer := &recordingTerraformInstaller{}
+	exec := executorWithInstalledAgent(t, nil)
+
+	require.NoError(t, exec.prepareRunTerraform(
+		installer,
+		db_lib.LocalAppInstallingArgs{EnvironmentVars: []string{"TF_IN_AUTOMATION=1"}},
+		[]string{"-input=false"},
+	))
+
+	require.True(t, installer.installed, "the installation stage must have run")
+	require.NotEmpty(t, exec.getSSHAgentEnv(),
+		"the agent must be installed, otherwise the test proves nothing")
+	assert.Equal(t, []string{"-input=false"}, installer.initArgs)
+	assertNoAgentSocket(t, installer.installingArgs.EnvironmentVars)
+}
+
+// The environment slice belongs to the caller and is appended to after the
+// preparation returns. Appending to it here would write into the caller's
+// backing array and the caller's own append would then overwrite the value.
+func TestPrepareRunDoesNotWriteIntoTheCallersEnvironment(t *testing.T) {
+	app := &recordingApp{}
+	exec := executorWithInstalledAgent(t, app)
+
+	env := make([]string, 1, 4)
+	env[0] = "ANSIBLE_FORCE_COLOR=True"
+
+	require.NoError(t, exec.prepareRun(db_lib.LocalAppInstallingArgs{EnvironmentVars: env}))
+
+	for i, v := range env[:cap(env)][len(env):] {
+		assert.Empty(t, v, "the preparation wrote into the caller's spare capacity at %d", i)
+	}
+}
+
+// captureLogrus routes the standard logger into the returned hook for the
+// duration of the test and keeps its output off the test log.
+func captureLogrus(t *testing.T) *logtest.Hook {
+	t.Helper()
+
+	std := logrus.StandardLogger()
+
+	prevHooks := make(logrus.LevelHooks)
+	for level, hooks := range std.Hooks {
+		prevHooks[level] = append([]logrus.Hook(nil), hooks...)
+	}
+	prevOut := std.Out
+
+	t.Cleanup(func() {
+		std.ReplaceHooks(prevHooks)
+		std.SetOutput(prevOut)
+	})
+
+	std.SetOutput(io.Discard)
+
+	return logtest.NewGlobal()
+}
+
+// An inventory key of type SSH whose agent was never started leaves the task
+// without SSH_AUTH_SOCK, and ansible then fails on the managed hosts with a
+// message that does not point back here.
+func TestGetSSHAgentEnv(t *testing.T) {
+	t.Run("reports a key whose agent is missing", func(t *testing.T) {
+		hook := captureLogrus(t)
+
+		exec := &LocalExecutor{
+			Task:      db.Task{ID: 42},
+			Inventory: db.Inventory{ID: 3, SSHKeyID: intPtr(9), SSHKey: db.AccessKey{Type: db.AccessKeySSH}},
+		}
+
+		assert.Empty(t, exec.getSSHAgentEnv())
+
+		entry := hook.LastEntry()
+		require.NotNil(t, entry, "the missing agent must be reported")
+		assert.Equal(t, logrus.WarnLevel, entry.Level)
+		assert.Equal(t, 42, entry.Data["task_id"])
+		assert.Equal(t, 3, entry.Data["inventory_id"])
+	})
+
+	t.Run("stays quiet when the agent is running", func(t *testing.T) {
+		hook := captureLogrus(t)
+
+		exec := &LocalExecutor{
+			Task:               db.Task{ID: 42},
+			Inventory:          db.Inventory{ID: 3, SSHKeyID: intPtr(9), SSHKey: db.AccessKey{Type: db.AccessKeySSH}},
+			sshKeyInstallation: ssh.AccessKeyInstallation{SSHAgent: &ssh.Agent{SocketFile: "/run/agent.sock"}},
+		}
+
+		assert.Equal(t, "SSH_AUTH_SOCK=/run/agent.sock", exec.getSSHAgentEnv())
+		assert.Nil(t, hook.LastEntry(), "a working agent is not worth a log line")
+	})
+
+	t.Run("stays quiet when the inventory has no ssh key", func(t *testing.T) {
+		hook := captureLogrus(t)
+
+		exec := &LocalExecutor{
+			Task:      db.Task{ID: 42},
+			Inventory: db.Inventory{ID: 3},
+		}
+
+		assert.Empty(t, exec.getSSHAgentEnv())
+		assert.Nil(t, hook.LastEntry(), "an inventory without a key needs no agent")
+	})
+}
+
+// The host selection must come from the task parameters alone: they are what
+// AllowOverrideLimit is checked against and what the target host variable
+// publishes to the playbook. A --limit smuggled into the raw task arguments
+// lands after the computed one on the command line, where ansible lets it win.
+func TestGetPlaybookArgsRejectsLimitInTaskArguments(t *testing.T) {
+	tests := []struct {
+		name               string
+		taskArgs           string
+		allowOverrideArgs  bool
+		allowOverrideLimit bool
+		wantRejected       bool
+	}{
+		{
+			name:              "long option with an attached value",
+			taskArgs:          `["--limit=prod-db01"]`,
+			allowOverrideArgs: true,
+			wantRejected:      true,
+		},
+		{
+			name:              "long option with a separate value",
+			taskArgs:          `["--limit", "prod-db01"]`,
+			allowOverrideArgs: true,
+			wantRejected:      true,
+		},
+		{
+			name:              "unambiguous long abbreviation",
+			taskArgs:          `["--lim", "prod-db01"]`,
+			allowOverrideArgs: true,
+			wantRejected:      true,
+		},
+		{
+			name:              "short option with a separate value",
+			taskArgs:          `["-l", "prod-db01"]`,
+			allowOverrideArgs: true,
+			wantRejected:      true,
+		},
+		{
+			name:              "short option with an attached value",
+			taskArgs:          `["-lprod-db01"]`,
+			allowOverrideArgs: true,
+			wantRejected:      true,
+		},
+		{
+			name:              "short option inside a cluster",
+			taskArgs:          `["-Dl", "prod-db01"]`,
+			allowOverrideArgs: true,
+			wantRejected:      true,
+		},
+		{
+			name:               "rejected even when the task may set the limit",
+			taskArgs:           `["--limit=prod-db01"]`,
+			allowOverrideArgs:  true,
+			allowOverrideLimit: true,
+			wantRejected:       true,
+		},
+		{
+			name:              "the arguments are ignored anyway when the template forbids them",
+			taskArgs:          `["--limit=prod-db01"]`,
+			allowOverrideArgs: false,
+			wantRejected:      false,
+		},
+		{
+			name:              "unrelated arguments",
+			taskArgs:          `["--forks", "10", "--diff"]`,
+			allowOverrideArgs: true,
+			wantRejected:      false,
+		},
+		{
+			name:              "a long option that merely starts like the limit",
+			taskArgs:          `["--list-hosts"]`,
+			allowOverrideArgs: true,
+			wantRejected:      false,
+		},
+		{
+			name:              "a value that looks like the short option",
+			taskArgs:          `["--ssh-extra-args", "-l root"]`,
+			allowOverrideArgs: true,
+			wantRejected:      false,
+		},
+		{
+			name:              "a value attached to another short option",
+			taskArgs:          `["-elocalhost"]`,
+			allowOverrideArgs: true,
+			wantRejected:      false,
+		},
+		{
+			name:              "everything after the separator is positional",
+			taskArgs:          `["--", "-l", "prod-db01"]`,
+			allowOverrideArgs: true,
+			wantRejected:      false,
+		},
+		{
+			name:              "become password file long form value starting with a dash",
+			taskArgs:          `["--become-password-file", "-l"]`,
+			allowOverrideArgs: true,
+			wantRejected:      false,
+		},
+		{
+			name:              "become password file short form value starting with a dash",
+			taskArgs:          `["--become-pass-file", "-l"]`,
+			allowOverrideArgs: true,
+			wantRejected:      false,
+		},
+		{
+			name:              "connection password file long form value starting with a dash",
+			taskArgs:          `["--connection-password-file", "-later/pass"]`,
+			allowOverrideArgs: true,
+			wantRejected:      false,
+		},
+		{
+			name:              "connection password file short form value starting with a dash",
+			taskArgs:          `["--conn-pass-file", "-later/pass"]`,
+			allowOverrideArgs: true,
+			wantRejected:      false,
+		},
+		{
+			name:              "vault password file short form value starting with a dash",
+			taskArgs:          `["--vault-pass-file", "-l"]`,
+			allowOverrideArgs: true,
+			wantRejected:      false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			setupExecutorConfig(t)
+			util.Config.TmpPath = t.TempDir()
+
+			exec := &LocalExecutor{
+				Task: db.Task{
+					TargetHostVar: "involved_hosts",
+					Arguments:     strPtr(tt.taskArgs),
+				},
+				Template: db.Template{
+					Playbook:                "test.yml",
+					AllowOverrideArgsInTask: tt.allowOverrideArgs,
+					TaskParams: db.MapStringAnyField{
+						"limit":                []any{"webservers"},
+						"allow_override_limit": tt.allowOverrideLimit,
+					},
+				},
+				Inventory: db.Inventory{Type: db.InventoryStatic},
+				Logger:    &recordingLogger{},
+			}
+
+			args, _, err := exec.getPlaybookArgs("admin", nil)
+
+			if tt.wantRejected {
+				require.Error(t, err)
+				assert.ErrorContains(t, err, "--limit")
+				return
+			}
+
+			require.NoError(t, err)
+			assert.Contains(t, args, "--limit=webservers",
+				"the limit computed from the parameters must still be applied")
+		})
+	}
 }

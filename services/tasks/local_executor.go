@@ -18,6 +18,7 @@ import (
 	"github.com/semaphoreui/semaphore/pkg/keylock"
 	"github.com/semaphoreui/semaphore/pkg/task_logger"
 	"github.com/semaphoreui/semaphore/util"
+	log "github.com/sirupsen/logrus"
 )
 
 type LocalExecutor struct {
@@ -198,6 +199,110 @@ func effectiveAnsibleLimit(tplParams db.AnsibleTemplateParams, params db.Ansible
 	}
 
 	return strings.Join(tplParams.Limit, ",")
+}
+
+// ansibleLimitFlagInArgs reports whether a raw argument list restricts the play
+// to hosts with ansible's --limit.
+//
+// The recognised forms follow python argparse, which ansible parses its command
+// line with: an unambiguous long-option prefix, a value attached with "=", the
+// short option alone, its value attached to it, and the short option inside a
+// cluster of other short options. Option values are skipped rather than
+// scanned, so an argument that only looks like the flag (--ssh-extra-args
+// "-l root") is not mistaken for one. An option missing from the tables below
+// can therefore cause a false rejection, never a missed one.
+func ansibleLimitFlagInArgs(args []string) bool {
+	// Long options of ansible-playbook that consume the next argument.
+	longOptionsWithValue := map[string]bool{
+		"--become-method":            true,
+		"--become-pass-file":         true,
+		"--become-password-file":     true,
+		"--become-user":              true,
+		"--conn-pass-file":           true,
+		"--connection":               true,
+		"--connection-password-file": true,
+		"--extra-vars":               true,
+		"--forks":                    true,
+		"--inventory":                true,
+		"--inventory-file":           true,
+		"--key-file":                 true,
+		"--module-path":              true,
+		"--playbook-dir":             true,
+		"--private-key":              true,
+		"--scp-extra-args":           true,
+		"--sftp-extra-args":          true,
+		"--skip-tags":                true,
+		"--ssh-common-args":          true,
+		"--ssh-extra-args":           true,
+		"--start-at-task":            true,
+		"--tags":                     true,
+		"--task-timeout":             true,
+		"--timeout":                  true,
+		"--user":                     true,
+		"--vault-id":                 true,
+		"--vault-pass-file":          true,
+		"--vault-password-file":      true,
+	}
+
+	// Short options of ansible-playbook that consume a value. "l" is left out
+	// on purpose: it is the one being looked for.
+	const shortOptionsWithValue = "TMcefitu"
+
+	for i := 0; i < len(args); i++ {
+		arg := args[i]
+
+		if arg == "--" {
+			// Everything past the separator is positional.
+			return false
+		}
+
+		if strings.HasPrefix(arg, "--") {
+			name, _, hasAttachedValue := strings.Cut(arg, "=")
+
+			if isAnsibleLimitLongOption(name) {
+				return true
+			}
+
+			if !hasAttachedValue && longOptionsWithValue[name] {
+				i++
+			}
+
+			continue
+		}
+
+		if len(arg) < 2 || arg[0] != '-' {
+			continue
+		}
+
+		for j := 1; j < len(arg); j++ {
+			if arg[j] == 'l' {
+				return true
+			}
+
+			if !strings.ContainsRune(shortOptionsWithValue, rune(arg[j])) {
+				continue
+			}
+
+			// The rest of the cluster is this option's value; when the option
+			// closes the token, the value is the next argument.
+			if j == len(arg)-1 {
+				i++
+			}
+
+			break
+		}
+	}
+
+	return false
+}
+
+// isAnsibleLimitLongOption reports whether name is --limit or one of the
+// prefixes argparse accepts for it. Anything shorter than --lim is ambiguous
+// with --list-hosts, --list-tasks and --list-tags, so argparse rejects it.
+func isAnsibleLimitLongOption(name string) bool {
+	const shortestAccepted = len("--lim")
+
+	return len(name) >= shortestAccepted && strings.HasPrefix("--limit", name)
 }
 
 // getEnvironmentExtraVarsJSON renders the extra vars of an Ansible task. The
@@ -723,6 +828,17 @@ func (t *LocalExecutor) getPlaybookArgs(username string, incomingVersion *string
 		return
 	}
 
+	// The raw task arguments are appended after the computed --limit, where
+	// ansible lets the last one win. A limit hidden in them would therefore
+	// override the host selection the parameters produced, bypassing
+	// AllowOverrideLimit and contradicting the limit published through the
+	// target host variable. The task limit parameter is the only way in.
+	if ansibleLimitFlagInArgs(taskArgs) {
+		err = fmt.Errorf("--limit is not allowed in the task arguments, use the task limit instead")
+		t.Log(err.Error())
+		return
+	}
+
 	var tags string
 	var skipTags string
 
@@ -1169,10 +1285,11 @@ func (t *LocalExecutor) prepareRun(installingArgs db_lib.LocalAppInstallingArgs)
 		return err
 	}
 
-	if sshEnv := t.getSSHAgentEnv(); sshEnv != "" {
-		installingArgs.EnvironmentVars = append(installingArgs.EnvironmentVars, sshEnv)
-	}
-
+	// The ssh agent socket is deliberately kept out of the installation
+	// environment: ansible-galaxy executes the roles and collections named by
+	// the repository, which would give repository content a signing oracle for
+	// the key Semaphore uses to reach the managed hosts. The socket belongs to
+	// the task run only, where it is added in Prepare.
 	if err := t.App.InstallRequirements(installingArgs); err != nil {
 		t.Log("Failed to install requirements: " + err.Error())
 		return err
@@ -1186,7 +1303,14 @@ func (t *LocalExecutor) prepareRun(installingArgs db_lib.LocalAppInstallingArgs)
 	return nil
 }
 
-func (t *LocalExecutor) prepareRunTerraform(tfApp *db_lib.TerraformApp, installingArgs db_lib.LocalAppInstallingArgs, initArgs []string) error {
+// terraformInstaller is the part of db_lib.TerraformApp the terraform
+// preparation uses. Taken as an interface so the preparation can be exercised
+// without a terraform binary on the host.
+type terraformInstaller interface {
+	InstallRequirementsWithInitArgs(args db_lib.LocalAppInstallingArgs, initArgs []string) error
+}
+
+func (t *LocalExecutor) prepareRunTerraform(tfApp terraformInstaller, installingArgs db_lib.LocalAppInstallingArgs, initArgs []string) error {
 
 	t.Log("Preparing: " + strconv.Itoa(t.Task.ID))
 
@@ -1225,11 +1349,11 @@ func (t *LocalExecutor) prepareRunTerraform(tfApp *db_lib.TerraformApp, installi
 		return err
 	}
 
-	if sshEnv := t.getSSHAgentEnv(); sshEnv != "" {
-		installingArgs.EnvironmentVars = append(installingArgs.EnvironmentVars, sshEnv)
-	}
-
-	// Call Terraform-specific install with init args
+	// The ssh agent socket is deliberately kept out of the installation
+	// environment: terraform init downloads and executes providers named by the
+	// repository, which would give repository content a signing oracle for the
+	// key Semaphore uses to reach the managed hosts. The socket belongs to the
+	// task run only, where it is added in Prepare.
 	if err := tfApp.InstallRequirementsWithInitArgs(installingArgs, initArgs); err != nil {
 		t.Log("Failed to install requirements: " + err.Error())
 		return err
@@ -1374,9 +1498,26 @@ func (t *LocalExecutor) installVaultKeyFiles() (err error) {
 }
 
 func (t *LocalExecutor) getSSHAgentEnv() string {
-	if t.Inventory.SSHKey.Type == db.AccessKeySSH && t.Inventory.SSHKeyID != nil && t.sshKeyInstallation.SSHAgent != nil {
-		return fmt.Sprintf("SSH_AUTH_SOCK=%s", t.sshKeyInstallation.SSHAgent.SocketFile)
+	if t.Inventory.SSHKeyID == nil || t.Inventory.SSHKey.Type != db.AccessKeySSH {
+		return ""
 	}
-	return ""
-}
 
+	if t.sshKeyInstallation.SSHAgent == nil {
+		// Defensive: KeyInstaller.Install always fills SSHAgent for
+		// AccessKeySSH, and a failing installInventory aborts preparation
+		// before this point runs, so the normal path never reaches here.
+		// Kept as a guard and logged in case a future installation path
+		// stops setting it. Without the socket ansible falls back to
+		// whatever credentials the process happens to have and fails on the
+		// managed hosts, with a message that does not point back here.
+		log.WithFields(log.Fields{
+			"context":      "task_running",
+			"task_id":      t.Task.ID,
+			"inventory_id": t.Inventory.ID,
+		}).Warn("inventory ssh key has no running agent")
+
+		return ""
+	}
+
+	return fmt.Sprintf("SSH_AUTH_SOCK=%s", t.sshKeyInstallation.SSHAgent.SocketFile)
+}
