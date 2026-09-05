@@ -94,4 +94,45 @@ func assertReferenceQueriesForPrune(t *testing.T, store *SqlDb) {
 		require.NoError(t, err)
 		assert.Empty(t, refs)
 	})
+
+	t.Run("link rows naming a template of another project are ignored", func(t *testing.T) {
+		// Both link tables carry their own project_id next to the template
+		// id, and nothing keeps the two in step. A row whose project_id
+		// disagrees with the template's own project would otherwise leak
+		// that template's name into the referrer list of a project that
+		// owns neither the template nor the link, and block a prune with a
+		// name its operator cannot see.
+		foreignKey, err := store.CreateAccessKey(db.AccessKey{ProjectID: &other.ID, Type: db.AccessKeyNone, Name: "none"})
+		require.NoError(t, err)
+		foreignRepo, err := store.CreateRepository(db.Repository{
+			ProjectID: other.ID, SSHKeyID: foreignKey.ID,
+			Name: "r", GitURL: "git@example.com:t/t", GitBranch: "main",
+		})
+		require.NoError(t, err)
+		foreignInv, err := store.CreateInventory(db.Inventory{ProjectID: other.ID, Name: "i", Type: db.InventoryStatic})
+		require.NoError(t, err)
+		foreignTpl, err := store.CreateTemplate(db.Template{
+			Name: "foreign", Playbook: "p.yml", ProjectID: other.ID,
+			RepositoryID: foreignRepo.ID, InventoryID: &foreignInv.ID,
+		})
+		require.NoError(t, err)
+
+		_, err = store.exec(
+			"insert into project__template_role (template_id, role_slug, project_id) values (?, ?, ?)",
+			foreignTpl.ID, role.Slug, proj.ID)
+		require.NoError(t, err)
+
+		_, err = store.exec(
+			"insert into project__template_vault (project_id, template_id, vault_key_id, type) values (?, ?, ?, 'password')",
+			proj.ID, foreignTpl.ID, vaultKey.ID)
+		require.NoError(t, err)
+
+		refs, err := store.GetProjectRoleRefs(proj.ID, role.Slug)
+		require.NoError(t, err)
+		assert.Equal(t, want, refs)
+
+		refs, err = store.GetTemplateVaultRefsByKey(proj.ID, vaultKey.ID)
+		require.NoError(t, err)
+		assert.Equal(t, want, refs)
+	})
 }

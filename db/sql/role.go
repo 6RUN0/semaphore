@@ -96,17 +96,23 @@ func (d *SqlDb) UpdateProjectRole(projectID int, role db.Role) error {
 func (d *SqlDb) DeleteProjectRole(projectID int, slug string) error {
 	res, err := d.exec("delete from `role` where slug=? and project_id=?", slug, projectID)
 	if err != nil {
-		return validateMutationResult(res, err)
+		// A failed exec leaves res nil, so pass nil rather than a result
+		// no caller may dereference.
+		return validateMutationResult(nil, err)
 	}
 	return requireAffectedRow(res)
 }
 
 func (d *SqlDb) GetProjectRoleRefs(projectID int, slug string) ([]db.ObjectReferrer, error) {
 	refs := make([]db.ObjectReferrer, 0)
+	// The link row carries its own project_id, denormalized from the
+	// template; nothing keeps the two in step, so the join repeats the
+	// check on the template itself. Otherwise a row whose project_id
+	// disagrees leaks a foreign template's name to this project.
 	_, err := d.selectAll(&refs,
 		"select t.id as id, t.name as name "+
 			"from project__template_role r "+
-			"join project__template t on t.id = r.template_id "+
+			"join project__template t on t.id = r.template_id and t.project_id = r.project_id "+
 			"where r.project_id = ? and r.role_slug = ? "+
 			"order by t.name",
 		projectID, slug)

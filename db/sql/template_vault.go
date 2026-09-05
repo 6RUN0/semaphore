@@ -88,10 +88,14 @@ func (d *SqlDb) UpdateTemplateVaults(projectID int, templateID int, vaults []db.
 
 func (d *SqlDb) GetTemplateVaultRefsByKey(projectID int, keyID int) ([]db.ObjectReferrer, error) {
 	refs := make([]db.ObjectReferrer, 0)
+	// The link row carries its own project_id, denormalized from the
+	// template; nothing keeps the two in step, so the join repeats the
+	// check on the template itself. Otherwise a row whose project_id
+	// disagrees leaks a foreign template's name to this project.
 	_, err := d.selectAll(&refs,
 		"select distinct t.id as id, t.name as name "+
 			"from project__template_vault v "+
-			"join project__template t on t.id = v.template_id "+
+			"join project__template t on t.id = v.template_id and t.project_id = v.project_id "+
 			"where v.project_id = ? and v.vault_key_id = ? "+
 			"order by t.name",
 		projectID, keyID)
